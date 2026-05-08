@@ -1,98 +1,63 @@
-name: FGH-Renew-Automation
+name: FGH-Renew-Auto
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 2,10,18 * * *'
+    # 每天按预定时间执行 (UTC时间)
+    - cron: '30 2,6,10,14,18,22 * * *'
 
 jobs:
   run_fgh_renew:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
-      - name: 📥 检出仓库
-        uses: actions/checkout@v4
+      # 1. 跨仓库拉取私有库代码 (核心变更点)
+      - name: 📥 拉取私库代码 (kanezikii/fgh_Renew)
+        run: |
+          # 使用 Secret 中的 Token 绕过权限拉取私有库
+          git clone https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git private_repo
+          # 将私有库中的 fgh_renew.py 复制到当前运行根目录
+          cp private_repo/fgh_renew.py fgh_renew.py
 
-      - name: 🐍 设置 Python 3.10
+      - name: 🐍 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.x'
 
-      - name: 🛠️ 部署代理环境 (Sing-Box TUN)
-        shell: bash
+      - name: 🛠️ 安装系统依赖
         run: |
-          echo "📥 下载核心组件..."
-          curl -L -o sing-box.zip "https://github.com/SagerNet/sing-box/releases/download/v1.9.0/sing-box-1.9.0-windows-amd64.zip"
-          unzip -q sing-box.zip
-          mv sing-box-1.9.0-windows-amd64/sing-box.exe .
-          
-          curl -L -o wintun.zip "https://www.wintun.net/builds/wintun-0.14.1.zip"
-          unzip -q wintun.zip
-          cp wintun/bin/amd64/wintun.dll .
-          
-          echo "📝 生成代理配置文件..."
-          cat << 'EOF' > config.json
-          {
-            "log": { "level": "info" },
-            "inbounds": [{
-              "type": "tun",
-              "inet4_address": "172.19.0.1/30",
-              "auto_route": true,
-              "stack": "system",
-              "sniff": true
-            }],
-            "outbounds": [
-              {
-                "type": "vless",
-                "tag": "proxy",
-                "server": "35.208.69.48",
-                "server_port": 35292,
-                "uuid": "bd613279-ca0c-492c-90a1-3dec6d77bf95",
-                "flow": "xtls-rprx-vision",
-                "tls": {
-                  "enabled": true,
-                  "server_name": "apple.com",
-                  "utls": { "enabled": true, "fingerprint": "chrome" },
-                  "reality": {
-                    "enabled": true,
-                    "public_key": "6pm6V2dVxBBzV_ApD7FuFZ0CKfLHggiVGKeI9SQxJEc",
-                    "short_id": "2a507ec5"
-                  }
-                }
-              },
-              { "type": "direct", "tag": "direct" }
-            ],
-            "route": {
-              "rules": [
-                { "domain_suffix": [".freegamehost.xyz", "freegamehost.xyz"], "outbound": "proxy" },
-                { "outbound": "direct" }
-              ],
-              "auto_detect_interface": true
-            }
-          }
-          EOF
-          
-          echo "🚀 启动网络代理..."
-          ./sing-box.exe run -c config.json &
-          sleep 10
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable xvfb x11-utils xdotool scrot unzip curl
 
-      - name: 🐍 安装依赖项
-        shell: bash
+      - name: 🐍 安装 Python 依赖
         run: |
-          pip install seleniumbase requests pyautogui
+          pip install seleniumbase requests
           seleniumbase install chromedriver
 
-      - name: 🚀 执行续期脚本
-        shell: bash
+      - name: 🚀 部署并启动本地代理 (Xray)
+        env:
+          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
+        run: |
+          # 下载并启动 Xray 代理以提供纯净的家宽/机房 IP
+          wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip xray -d ./xray-bin
+          chmod +x ./xray-bin/xray
+          echo "$XRAY_CONFIG" > ./xray-bin/config.json
+          nohup ./xray-bin/xray run -c ./xray-bin/config.json > xray.log 2>&1 &
+          sleep 3
+
+      - name: 🚀 执行核心自动化脚本
         env:
           PYTHONIOENCODING: utf-8
-          PYTHONUTF8: "1"  # 👈 强制开启 Python 的全 UTF-8 模式
           FGH_ACCOUNT: ${{ secrets.FGH_ACCOUNT }}
+          FGH_COOKIES: ${{ secrets.FGH_COOKIES }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: |
-          python renew.py
+          # 使用虚拟显示器运行刚刚从私库拉取过来的脚本
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python fgh_renew.py
 
-      - name: 📸 保存调试证据
+      - name: 📸 上传运行截图 (便于排错)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs
+          name: debug-screenshots
           path: "*.png"
+          retention-days: 3
