@@ -1,0 +1,98 @@
+name: FGH-Renew-Automation
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2,10,18 * * *'
+
+jobs:
+  run_fgh_renew:
+    runs-on: windows-latest
+    steps:
+      - name: 📥 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 🐍 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 🛠️ 部署代理环境 (Sing-Box TUN)
+        shell: bash
+        run: |
+          echo "📥 下载核心组件..."
+          curl -L -o sing-box.zip "https://github.com/SagerNet/sing-box/releases/download/v1.9.0/sing-box-1.9.0-windows-amd64.zip"
+          unzip -q sing-box.zip
+          mv sing-box-1.9.0-windows-amd64/sing-box.exe .
+          
+          curl -L -o wintun.zip "https://www.wintun.net/builds/wintun-0.14.1.zip"
+          unzip -q wintun.zip
+          cp wintun/bin/amd64/wintun.dll .
+          
+          echo "📝 生成代理配置文件..."
+          cat << 'EOF' > config.json
+          {
+            "log": { "level": "info" },
+            "inbounds": [{
+              "type": "tun",
+              "inet4_address": "172.19.0.1/30",
+              "auto_route": true,
+              "stack": "system",
+              "sniff": true
+            }],
+            "outbounds": [
+              {
+                "type": "vless",
+                "tag": "proxy",
+                "server": "35.208.69.48",
+                "server_port": 35292,
+                "uuid": "bd613279-ca0c-492c-90a1-3dec6d77bf95",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "apple.com",
+                  "utls": { "enabled": true, "fingerprint": "chrome" },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "6pm6V2dVxBBzV_ApD7FuFZ0CKfLHggiVGKeI9SQxJEc",
+                    "short_id": "2a507ec5"
+                  }
+                }
+              },
+              { "type": "direct", "tag": "direct" }
+            ],
+            "route": {
+              "rules": [
+                { "domain_suffix": [".freegamehost.xyz", "freegamehost.xyz"], "outbound": "proxy" },
+                { "outbound": "direct" }
+              ],
+              "auto_detect_interface": true
+            }
+          }
+          EOF
+          
+          echo "🚀 启动网络代理..."
+          ./sing-box.exe run -c config.json &
+          sleep 10
+
+      - name: 🐍 安装依赖项
+        shell: bash
+        run: |
+          pip install seleniumbase requests pyautogui
+          seleniumbase install chromedriver
+
+      - name: 🚀 执行续期脚本
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"  # 👈 强制开启 Python 的全 UTF-8 模式
+          FGH_ACCOUNT: ${{ secrets.FGH_ACCOUNT }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+        run: |
+          python renew.py
+
+      - name: 📸 保存调试证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs
+          path: "*.png"
