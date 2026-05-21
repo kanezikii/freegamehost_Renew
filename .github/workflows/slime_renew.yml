@@ -2,8 +2,8 @@ name: Slime Auto Renew
 
 on:
   schedule:
-    # 每天跑一次（你可以根据实际到期时间自己改 cron）
-    - cron: '0 2 * * *'
+    # 每 6 小时自动跑一次检查剩余时长
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -15,8 +15,8 @@ jobs:
       - name: 📥 拉取私有仓库代码
         uses: actions/checkout@v4
         with:
-          # 指定你的私库路径
-          repository: kanezikii/fgh_Renew/slime_renew.py
+          # 【重要修正】只写仓库路径，不写文件名
+          repository: kanezikii/fgh_Renew
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
       - name: 🐍 设置 Python 环境
@@ -32,9 +32,8 @@ jobs:
 
       - name: 🚀 执行自动续期脚本
         env:
-          # 把 Secret 里的 cookie 值传给 Python 脚本
+          # 把 Secret 里的 session 值传给 Python
           CONNECT_SID: ${{ secrets.CONNECT_SID }}
-        # 运行你私库里的这个指定文件
         run: python slime_renew.py
 
       - name: 📸 提取执行结果截图
