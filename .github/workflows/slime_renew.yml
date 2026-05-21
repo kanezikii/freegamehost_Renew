@@ -17,7 +17,7 @@ jobs:
         with:
           # 【重要修正】只写仓库路径，不写文件名
           repository: kanezikii/fgh_Renew
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          token: ${{ secrets.PRIVATE_PAT }}
 
       - name: 🐍 设置 Python 环境
         uses: actions/setup-python@v5
