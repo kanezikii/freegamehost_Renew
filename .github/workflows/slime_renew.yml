@@ -34,6 +34,8 @@ jobs:
         env:
           # 把 Secret 里的 session 值传给 Python
           CONNECT_SID: ${{ secrets.CONNECT_SID }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python slime_renew.py
 
       - name: 📸 提取执行结果截图
