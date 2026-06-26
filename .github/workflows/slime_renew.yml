@@ -2,8 +2,8 @@ name: Slime Auto Renew
 
 on:
   schedule:
-    # 每 6 小时自动跑一次检查剩余时长
-    - cron: '0 */6 * * *'
+    # 每 12 小时自动跑一次检查剩余时长
+    - cron: '0 */12 * * *'
   workflow_dispatch:
 
 jobs:
