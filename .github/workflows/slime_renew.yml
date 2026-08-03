@@ -2,7 +2,7 @@ name: Slime Auto Renew
 
 on:
   schedule:
-    - cron: '0 */11 * * *'   # 每 12 小时
+    - cron: '0 */11 * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: write          # 清理工作流需要此权限
+      actions: write
 
     steps:
       - name: 📥 拉取代码
@@ -37,9 +37,15 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
+          # 强制去掉可能存在的换行符和空格
           GH_OWNER: ${{ secrets.GH_OWNER }}
           GH_REPO: ${{ secrets.GH_REPO }}
-        run: python slime_renew.py
+        run: |
+          # 清理环境变量里的换行符（非常关键）
+          export GH_OWNER=$(echo "$GH_OWNER" | tr -d '\n\r ')
+          export GH_REPO=$(echo "$GH_REPO" | tr -d '\n\r ')
+          echo "使用仓库: $GH_OWNER/$GH_REPO"
+          python slime_renew.py
 
       - name: 📸 上传截图
         uses: actions/upload-artifact@v4
@@ -58,17 +64,37 @@ jobs:
           pkill -f Xvfb || true
           rm -f sing-box sing-box-config.json sing-box.log
 
+      # ==================== 修复后的清理步骤 ====================
       - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # 使用你权限最高的 PAT
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          # 清理可能存在的换行符
+          OWNER=$(echo "${{ secrets.GH_OWNER }}" | tr -d '\n\r ')
+          REPO=$(echo "${{ secrets.GH_REPO }}" | tr -d '\n\r ')
+          
+          echo "正在清理仓库: $OWNER/$REPO"
+          
+          runs=$(gh run list \
+            --repo "$OWNER/$REPO" \
+            --workflow="Slime Auto Renew" \
+            --limit=100 \
+            --json databaseId \
+            --jq '.[].databaseId' 2>/dev/null || true)
+          
+          if [ -z "$runs" ]; then
+            echo "未找到可清理的运行记录"
+            exit 0
+          fi
+          
           count=0
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 1 ]; then
-              echo "删除运行记录: $run_id"
-              gh run delete $run_id || true
+              echo "删除旧运行记录: $run_id"
+              gh run delete "$run_id" --repo "$OWNER/$REPO" || true
             fi
           done
+          
+          echo "清理完成，仅保留最新 1 条记录"
