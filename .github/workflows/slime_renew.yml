@@ -2,46 +2,73 @@ name: Slime Auto Renew
 
 on:
   schedule:
-    # 每 12 小时自动跑一次检查剩余时长
-    - cron: '0 */12 * * *'
+    - cron: '0 */12 * * *'   # 每 12 小时
   workflow_dispatch:
 
 jobs:
   renew-server:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write          # 清理工作流需要此权限
 
     steps:
-      - name: 📥 拉取私有仓库代码
+      - name: 📥 拉取代码
         uses: actions/checkout@v4
         with:
-          # 【重要修正】只写仓库路径，不写文件名
           repository: kanezikii/fgh_Renew
           token: ${{ secrets.PRIVATE_PAT }}
 
-      - name: 🐍 设置 Python 环境
+      - name: 🐍 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 安装浏览器自动化依赖
+      - name: 📦 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
+          pip install playwright pynacl
           playwright install chromium
 
-      - name: 🚀 执行自动续期脚本
+      - name: 🚀 执行自动续期 + 更新 Cookie
         env:
-          # 把 Secret 里的 session 值传给 Python
           CONNECT_SID: ${{ secrets.CONNECT_SID }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_OWNER: ${{ secrets.GH_OWNER }}
+          GH_REPO: ${{ secrets.GH_REPO }}
         run: python slime_renew.py
 
-      - name: 📸 提取执行结果截图
+      - name: 📸 上传截图
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: renew-screenshot
           path: renew_result.png
           retention-days: 3
+
+      - name: 🧽 清理进程和临时文件
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f chromedriver || true
+          pkill -f chrome || true
+          pkill -f Xvfb || true
+          rm -f sing-box sing-box-config.json sing-box.log
+
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
