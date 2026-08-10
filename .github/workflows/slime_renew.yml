@@ -31,6 +31,29 @@ jobs:
           pip install playwright pynacl
           playwright install chromium
 
+      - name: 🌐 启动 Hysteria2 代理节点 (US-Oracle)
+        run: |
+          # 下载最新版 Hysteria2 Linux 内核
+          wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
+          chmod +x hysteria
+          
+          # 生成 Hysteria2 客户端配置文件
+          cat << 'EOF' > hy2.yaml
+          server: 129.213.91.185:35013
+          auth: 4291c983-c520-46ac-82cc-48f14bef573f
+          tls:
+            sni: www.bing.com
+            insecure: true
+          socks5:
+            listen: 127.0.0.1:10808
+          EOF
+          
+          # 在后台挂起运行代理客户端
+          ./hysteria client -c hy2.yaml &
+          
+          # 等待 5 秒确保代理启动并连接成功
+          sleep 5
+
       - name: 🚀 执行自动续期 + 更新 Cookie
         env:
           CONNECT_SID: ${{ secrets.CONNECT_SID }}
@@ -58,11 +81,12 @@ jobs:
       - name: 🧽 清理进程和临时文件
         if: always()
         run: |
+          pkill -f hysteria || true
           pkill -f sing-box || true
           pkill -f chromedriver || true
           pkill -f chrome || true
           pkill -f Xvfb || true
-          rm -f sing-box sing-box-config.json sing-box.log
+          rm -f hysteria hy2.yaml sing-box sing-box-config.json sing-box.log
 
       # ==================== 修复后的清理步骤 ====================
       - name: 🧹 清理旧的工作流运行记录
