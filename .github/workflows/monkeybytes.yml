@@ -40,20 +40,48 @@ jobs:
           python3 -m pip install requests
 
       # ======================================================
-      # 3. 生成 sing-box 配置 (原生 Python 运行，彻底解决引号冲突)
+      # 3. 自动识别代理并启动 (VLESS -> sing-box / 其他 -> GOST)
       # ======================================================
-      - name: ⚙️ 生成 sing-box 配置
-        if: startsWith(secrets.GOST_PROXY, 'vless://')
-        shell: python
+      - name: 🛡️ 启动代理服务
         env:
-          VLESS_URI: ${{ secrets.GOST_PROXY }}
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
+          set -Eeuo pipefail
+
+          if [ -z "${GOST_PROXY:-}" ]; then
+            echo "🌐 未配置 GOST_PROXY，使用直连模式"
+            {
+              echo "PROXY_TYPE=direct"
+              echo "HTTP_PROXY="
+              echo "HTTPS_PROXY="
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # ----------------------------------------------------
+          # 3.1 VLESS 节点 -> sing-box
+          # ----------------------------------------------------
+          if [[ "$GOST_PROXY" == vless://* ]]; then
+            echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
+
+            SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+            SB_VERSION="${SB_TAG#v}"
+            echo "📦 sing-box 版本: ${SB_TAG}"
+
+            curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_VERSION}-linux-amd64.tar.gz" -o sing-box.tar.gz
+            mkdir -p sing-box-extract
+            tar -xzf sing-box.tar.gz -C sing-box-extract
+            SINGBOX_BIN="$(find sing-box-extract -type f -name sing-box -print -quit)"
+            chmod +x "$SINGBOX_BIN"
+
+            # 动态生成 sing-box.json 配置文件
+            cat << 'EOF' > make_singbox.py
           import json
           import os
           import sys
           from urllib.parse import urlparse, parse_qs, unquote
 
-          uri = os.environ.get("VLESS_URI", "").strip()
+          uri = os.environ.get("GOST_PROXY", "").strip()
           parsed = urlparse(uri)
 
           if parsed.scheme.lower() != "vless":
@@ -121,38 +149,9 @@ jobs:
               json.dump(config, f, ensure_ascii=False, indent=2)
 
           print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
+          EOF
 
-      # ======================================================
-      # 4. 启动代理服务 (sing-box / GOST / 直连)
-      # ======================================================
-      - name: 🛡️ 启动代理服务
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-        run: |
-          set -Eeuo pipefail
-
-          if [ -z "${GOST_PROXY:-}" ]; then
-            echo "🌐 未配置 GOST_PROXY，使用直连模式"
-            {
-              echo "PROXY_TYPE=direct"
-              echo "HTTP_PROXY="
-              echo "HTTPS_PROXY="
-            } >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          if [[ "$GOST_PROXY" == vless://* ]]; then
-            echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
-
-            SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-            SB_VERSION="${SB_TAG#v}"
-            echo "📦 sing-box 版本: ${SB_TAG}"
-
-            curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_VERSION}-linux-amd64.tar.gz" -o sing-box.tar.gz
-            mkdir -p sing-box-extract
-            tar -xzf sing-box.tar.gz -C sing-box-extract
-            SINGBOX_BIN="$(find sing-box-extract -type f -name sing-box -print -quit)"
-            chmod +x "$SINGBOX_BIN"
+            python3 make_singbox.py
 
             echo "🔍 检查 sing-box 配置"
             "$SINGBOX_BIN" check -c sing-box.json
@@ -185,7 +184,11 @@ jobs:
             exit 0
           fi
 
+          # ----------------------------------------------------
+          # 3.2 常规代理 -> GOST
+          # ----------------------------------------------------
           echo "🟢 检测到常规代理，准备启动 GOST"
+
           GOST_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ginuerzh/gost/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
           GOST_VERSION="${GOST_TAG#v}"
           echo "📦 GOST 版本: ${GOST_VERSION}"
@@ -222,7 +225,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # ======================================================
-      # 5. 执行自动化续期脚本
+      # 4. 执行自动化续期脚本
       # ======================================================
       - name: 🤖 执行自动化脚本
         env:
@@ -239,7 +242,7 @@ jobs:
           python3 -u monkeybytes.py
 
       # ======================================================
-      # 6. 清理代理进程
+      # 5. 清理代理进程
       # ======================================================
       - name: 🧹 清理代理进程
         if: always()
