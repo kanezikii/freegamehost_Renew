@@ -33,7 +33,7 @@ jobs:
           ls -lh ./monkeybytes.py
 
       # ======================================================
-      # 2. Python 环境与依赖 (已移除 cache 配置)
+      # 2. Python 环境与依赖
       # ======================================================
       - name: 🐍 安装 Python 环境
         uses: actions/setup-python@v5
@@ -73,10 +73,7 @@ jobs:
           if [[ "$GOST_PROXY" == vless://* ]]; then
             echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
 
-            SB_TAG="$(curl -fsSL \
-              -H 'Accept: application/vnd.github+json' \
-              https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+            SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
 
             if [ -z "$SB_TAG" ]; then
               echo "❌ 无法获取 sing-box 版本"
@@ -104,13 +101,11 @@ jobs:
             chmod +x "$SINGBOX_BIN"
 
             export VLESS_URI="$GOST_PROXY"
-            python3 - << 'PY'
-import json
-import os
-import sys
+            python3 -c '
+import json, os, sys
 from urllib.parse import urlparse, parse_qs, unquote
 
-uri = os.environ["VLESS_URI"].strip()
+uri = os.environ.get("VLESS_URI", "").strip()
 parsed = urlparse(uri)
 
 if parsed.scheme.lower() != "vless":
@@ -178,7 +173,7 @@ with open("sing-box.json", "w", encoding="utf-8") as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
 
 print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
-PY
+'
 
             echo "🔍 检查 sing-box 配置"
             "$SINGBOX_BIN" check -c sing-box.json
@@ -217,10 +212,7 @@ PY
           # ----------------------------------------------------
           echo "🟢 检测到常规代理，准备启动 GOST"
 
-          GOST_TAG="$(curl -fsSL \
-            -H 'Accept: application/vnd.github+json' \
-            https://api.github.com/repos/ginuerzh/gost/releases/latest \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+          GOST_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ginuerzh/gost/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
 
           if [ -z "$GOST_TAG" ]; then
             echo "❌ 无法获取 GOST 版本"
