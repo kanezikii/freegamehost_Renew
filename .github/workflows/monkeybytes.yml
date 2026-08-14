@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: kanezikii/fgh_Renew
-          token: ${{ secrets.PRIVATE_PAT }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
 
       - name: 📂 复制脚本到根目录
@@ -33,13 +33,12 @@ jobs:
           ls -lh ./monkeybytes.py
 
       # ======================================================
-      # 2. Python 环境与依赖
+      # 2. Python 环境与依赖 (已移除 cache 配置)
       # ======================================================
       - name: 🐍 安装 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: 📦 安装 Python 依赖
         shell: bash
@@ -106,80 +105,80 @@ jobs:
 
             export VLESS_URI="$GOST_PROXY"
             python3 - << 'PY'
-          import json
-          import os
-          import sys
-          from urllib.parse import urlparse, parse_qs, unquote
+import json
+import os
+import sys
+from urllib.parse import urlparse, parse_qs, unquote
 
-          uri = os.environ["VLESS_URI"].strip()
-          parsed = urlparse(uri)
+uri = os.environ["VLESS_URI"].strip()
+parsed = urlparse(uri)
 
-          if parsed.scheme.lower() != "vless":
-              print("❌ GOST_PROXY 不是有效 VLESS 链接")
-              sys.exit(1)
+if parsed.scheme.lower() != "vless":
+    print("❌ GOST_PROXY 不是有效 VLESS 链接")
+    sys.exit(1)
 
-          uuid = parsed.username
-          server = parsed.hostname
-          port = parsed.port
+uuid = parsed.username
+server = parsed.hostname
+port = parsed.port
 
-          if not uuid or not server or not port:
-              print("❌ VLESS 节点配置不完整")
-              sys.exit(1)
+if not uuid or not server or not port:
+    print("❌ VLESS 节点配置不完整")
+    sys.exit(1)
 
-          params = parse_qs(parsed.query)
-          security = params.get("security", ["none"])[0].lower()
-          network = params.get("type", ["tcp"])[0].lower()
-          sni = unquote(params.get("sni", [server])[0])
-          host = unquote(params.get("host", [""])[0])
-          path = unquote(params.get("path", ["/"])[0])
-          fingerprint = params.get("fp", [""])[0]
+params = parse_qs(parsed.query)
+security = params.get("security", ["none"])[0].lower()
+network = params.get("type", ["tcp"])[0].lower()
+sni = unquote(params.get("sni", [server])[0])
+host = unquote(params.get("host", [""])[0])
+path = unquote(params.get("path", ["/"])[0])
+fingerprint = params.get("fp", [""])[0]
 
-          outbound = {
-              "type": "vless",
-              "tag": "vless-out",
-              "server": server,
-              "server_port": port,
-              "uuid": uuid,
-          }
+outbound = {
+    "type": "vless",
+    "tag": "vless-out",
+    "server": server,
+    "server_port": port,
+    "uuid": uuid,
+}
 
-          if security == "tls":
-              outbound["tls"] = {
-                  "enabled": True,
-                  "server_name": sni,
-              }
-              if fingerprint:
-                  outbound["tls"]["utls"] = {
-                      "enabled": True,
-                      "fingerprint": fingerprint,
-                  }
+if security == "tls":
+    outbound["tls"] = {
+        "enabled": True,
+        "server_name": sni,
+    }
+    if fingerprint:
+        outbound["tls"]["utls"] = {
+            "enabled": True,
+            "fingerprint": fingerprint,
+        }
 
-          if network == "ws":
-              transport = {"type": "ws", "path": path}
-              if host:
-                  transport["headers"] = {"Host": host}
-              outbound["transport"] = transport
+if network == "ws":
+    transport = {"type": "ws", "path": path}
+    if host:
+        transport["headers"] = {"Host": host}
+    outbound["transport"] = transport
 
-          config = {
-              "log": {"level": "warn"},
-              "inbounds": [
-                  {
-                      "type": "mixed",
-                      "tag": "proxy-in",
-                      "listen": "127.0.0.1",
-                      "listen_port": 10808
-                  }
-              ],
-              "outbounds": [
-                  outbound,
-                  {"type": "direct", "tag": "direct"}
-              ]
-          }
+config = {
+    "log": {"level": "warn"},
+    "inbounds": [
+        {
+            "type": "mixed",
+            "tag": "proxy-in",
+            "listen": "127.0.0.1",
+            "listen_port": 10808
+        }
+    ],
+    "outbounds": [
+        outbound,
+        {"type": "direct", "tag": "direct"}
+    ]
+}
 
-          with open("sing-box.json", "w", encoding="utf-8") as f:
-              json.dump(config, f, ensure_ascii=False, indent=2)
+with open("sing-box.json", "w", encoding="utf-8") as f:
+    json.dump(config, f, ensure_ascii=False, indent=2)
 
-          print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
-          PY
+print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
+PY
 
             echo "🔍 检查 sing-box 配置"
             "$SINGBOX_BIN" check -c sing-box.json
