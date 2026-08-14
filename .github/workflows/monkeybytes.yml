@@ -18,7 +18,7 @@ jobs:
           path: private
           
       - name: 📂 复制脚本到工作目录
-        run: cp private/monkeybytes.py monkeybytes.py
+        run: cp fgh_Renew/monkeybytes.py monkeybytes.py
         
       - name: 🐍 安装依赖
         run: pip install requests
