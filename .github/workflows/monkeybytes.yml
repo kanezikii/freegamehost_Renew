@@ -192,7 +192,8 @@ jobs:
           GOST_VERSION="${GOST_TAG#v}"
           echo "📦 GOST 版本: ${GOST_VERSION}"
 
-          curl -fsSL --retry 3 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/gost_${GOST_VERSION}_linux_amd64.tar.gz" -o gost.tar.gz
+          GOST_ARCHIVE="gost_${GOST_VERSION}_linux_amd64.tar.gz"
+          curl -fL --retry 3 --retry-delay 2 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/${GOST_ARCHIVE}" -o gost.tar.gz
           tar -xzf gost.tar.gz
           GOST_BIN="$(find . -maxdepth 3 -type f -name gost -print -quit)"
           chmod +x "$GOST_BIN"
@@ -224,13 +225,15 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # ======================================================
-      # 4. 执行自动化续期脚本
+      # 4. 执行自动化续期脚本 (注入 GH_TOKEN 与 仓库信息)
       # ======================================================
       - name: 🤖 执行自动化脚本
         env:
           MONKEY_ACCOUNT: ${{ secrets.MONKEY_ACCOUNT }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
+          GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -Eeuo pipefail
           echo "=========================================="
@@ -241,26 +244,7 @@ jobs:
           python3 -u monkeybytes.py
 
       # ======================================================
-      # 5. 自动同步更新 MONKEY_ACCOUNT Secret
-      # ======================================================
-      - name: 🔄 同步最新 Cookies 到 GitHub Secret
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
-        run: |
-          if [ -f new_cookies.txt ] && [ -s new_cookies.txt ]; then
-            NEW_COOKIES="$(cat new_cookies.txt | tr -d '\r\n')"
-            if [ -n "$NEW_COOKIES" ]; then
-              echo "🔑 正在同步最新 Cookies 到 GitHub Secret MONKEY_ACCOUNT..."
-              echo "$NEW_COOKIES" | gh secret set MONKEY_ACCOUNT --repo "${{ github.repository }}"
-              echo "✅ GitHub Secret [MONKEY_ACCOUNT] 已成功自动更新！"
-            fi
-          else
-            echo "ℹ️ 未生成有效新 Cookies 文件，跳过 Secret 更新"
-          fi
-
-      # ======================================================
-      # 6. 彻底清理后台进程与临时文件
+      # 5. 彻底清理后台进程与临时文件
       # ======================================================
       - name: 🧹 清理代理与后台进程
         if: always()
@@ -270,11 +254,11 @@ jobs:
           if [ -f gost.pid ]; then kill -9 "$(<gost.pid)" 2>/dev/null || true; fi
           pkill -9 -f sing-box 2>/dev/null || true
           pkill -9 -f gost 2>/dev/null || true
-          rm -f sing-box.pid gost.pid sing-box.log gost.log make_singbox.py /tmp/vless_ip.txt /tmp/gost_ip.txt new_cookies.txt || true
+          rm -f sing-box.pid gost.pid sing-box.log gost.log make_singbox.py /tmp/vless_ip.txt /tmp/gost_ip.txt || true
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 7. 清理旧工作流记录 (仅保留最近 5 次)
+      # 6. 清理旧工作流记录 (仅保留最近 5 次)
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
