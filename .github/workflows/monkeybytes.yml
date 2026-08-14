@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # ======================================================
+      # 拉取私库中的 monkeybytes.py
+      # ======================================================
       - name: 📥 拉取私库脚本
         uses: actions/checkout@v4
         with:
@@ -19,73 +22,140 @@ jobs:
           path: private
 
       - name: 📂 复制脚本
-        run: |
-          cp private/monkeybytes.py ./monkeybytes.py
-          chmod +x ./monkeybytes.py
-
-      - name: 🐍 安装 Python 依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      # ======================================================
-      # 自动识别 GOST_PROXY
-      #
-      # vless://...   -> sing-box -> SOCKS5 127.0.0.1:10808
-      #
-      # 其他代理 URL   -> GOST -> HTTP 127.0.0.1:8080
-      #
-      # 未配置          -> 直连
-      # ======================================================
-
-      - name: 🛡️ 启动代理
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        shell: bash
         run: |
           set -e
 
-          if [ -z "$GOST_PROXY" ]; then
+          test -f private/monkeybytes.py
+
+          cp private/monkeybytes.py ./monkeybytes.py
+          chmod +x ./monkeybytes.py
+
+          echo "✅ monkeybytes.py 准备完成"
+          ls -lh ./monkeybytes.py
+
+      # ======================================================
+      # Python
+      # ======================================================
+      - name: 🐍 安装 Python 依赖
+        shell: bash
+        run: |
+          set -e
+
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      # ======================================================
+      # 自动识别代理
+      #
+      # VLESS:
+      #   VLESS
+      #      ↓
+      #   sing-box
+      #      ↓
+      #   HTTP/Mixed 127.0.0.1:10808
+      #      ↓
+      #   monkeybytes.py
+      #
+      # 其他 GOST URL:
+      #   GOST
+      #      ↓
+      #   HTTP 127.0.0.1:8080
+      #      ↓
+      #   monkeybytes.py
+      # ======================================================
+      - name: 🛡️ 启动代理
+        shell: bash
+        env:
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        run: |
+          set -Eeuo pipefail
+
+          if [ -z "${GOST_PROXY:-}" ]; then
             echo "🌐 未配置 GOST_PROXY，使用直连模式"
+            {
+              echo "PROXY_TYPE=direct"
+              echo "HTTP_PROXY="
+              echo "HTTPS_PROXY="
+            } >> "$GITHUB_ENV"
             exit 0
           fi
 
-          # --------------------------------------------------
+          # ====================================================
           # VLESS
-          # --------------------------------------------------
+          # ====================================================
           if [[ "$GOST_PROXY" == vless://* ]]; then
 
             echo "🔵 检测到 VLESS 节点"
-            echo "🚀 使用 sing-box 建立本地 SOCKS5"
+            echo "🚀 使用 sing-box"
 
-            SB_VERSION=$(curl -fsSL \
-              https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-              | grep '"tag_name"' \
-              | head -1 \
-              | cut -d '"' -f4)
+            # --------------------------------------------------
+            # 获取最新稳定版本
+            # --------------------------------------------------
+            SB_TAG="$(
+              curl -fsSL \
+                -H 'Accept: application/vnd.github+json' \
+                https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+                | python -c '
+import json,sys
+print(json.load(sys.stdin)["tag_name"])
+'
+            )"
 
-            echo "📦 sing-box 版本: $SB_VERSION"
+            if [ -z "$SB_TAG" ]; then
+              echo "❌ 无法获取 sing-box 版本"
+              exit 1
+            fi
 
-            SB_VERSION_NO_V="${SB_VERSION#v}"
+            SB_VERSION="${SB_TAG#v}"
 
-            wget -q \
-              "https://github.com/SagerNet/sing-box/releases/download/${SB_VERSION}/sing-box-${SB_VERSION_NO_V}-linux-amd64.tar.gz" \
-              -O sing-box.tar.gz
+            echo "📦 sing-box: ${SB_TAG}"
 
-            tar -xzf sing-box.tar.gz
+            # --------------------------------------------------
+            # 下载官方 Linux amd64
+            # --------------------------------------------------
+            SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64.tar.gz"
 
-            SINGBOX_BIN=$(find . -type f -name sing-box | head -1)
+            SB_URL="https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/${SB_ARCHIVE}"
+
+            echo "⬇️ 下载:"
+            echo "$SB_URL"
+
+            curl -fL \
+              --retry 3 \
+              --retry-delay 2 \
+              "$SB_URL" \
+              -o sing-box.tar.gz
+
+            # --------------------------------------------------
+            # 解压
+            # --------------------------------------------------
+            rm -rf sing-box-extract
+            mkdir -p sing-box-extract
+
+            tar -xzf sing-box.tar.gz \
+              -C sing-box-extract
+
+            SINGBOX_BIN="$(
+              find sing-box-extract \
+                -type f \
+                -name sing-box \
+                -print -quit
+            )"
 
             if [ -z "$SINGBOX_BIN" ]; then
-              echo "❌ 未找到 sing-box"
+              echo "❌ 未找到 sing-box 二进制文件"
+              find sing-box-extract -maxdepth 3 -type f -print
               exit 1
             fi
 
             chmod +x "$SINGBOX_BIN"
 
-            # ------------------------------------------------
-            # 使用 Python 将 VLESS URI 转换成 sing-box JSON
-            # ------------------------------------------------
+            echo "✅ sing-box: $SINGBOX_BIN"
 
+            # --------------------------------------------------
+            # VLESS -> sing-box JSON
+            # --------------------------------------------------
             export VLESS_URI="$GOST_PROXY"
 
             python - <<'PY'
@@ -94,64 +164,78 @@ import os
 import sys
 from urllib.parse import urlparse, parse_qs, unquote
 
-uri = os.environ["VLESS_URI"]
+uri = os.environ["VLESS_URI"].strip()
 
-u = urlparse(uri)
+parsed = urlparse(uri)
 
-if u.scheme.lower() != "vless":
-    print("❌ 不是 VLESS URI")
+if parsed.scheme.lower() != "vless":
+    print("❌ GOST_PROXY 不是 VLESS URI")
     sys.exit(1)
 
-uuid = u.username
-server = u.hostname
-port = u.port
+uuid = parsed.username
+server = parsed.hostname
+port = parsed.port
 
-if not uuid or not server or not port:
-    print("❌ VLESS 缺少 UUID / 服务器 / 端口")
+if not uuid:
+    print("❌ VLESS 缺少 UUID")
     sys.exit(1)
 
-q = parse_qs(u.query)
+if not server:
+    print("❌ VLESS 缺少服务器地址")
+    sys.exit(1)
 
-security = q.get("security", ["none"])[0]
-sni = q.get("sni", [server])[0]
+if not port:
+    print("❌ VLESS 缺少端口")
+    sys.exit(1)
 
-network = q.get("type", ["tcp"])[0]
+params = parse_qs(parsed.query)
 
-if network != "ws":
-    print(f"⚠️ 当前节点传输类型: {network}")
+security = params.get("security", ["none"])[0].lower()
+network = params.get("type", ["tcp"])[0].lower()
 
-host = q.get("host", [""])[0]
-path = q.get("path", ["/"])[0]
+sni = params.get("sni", [server])[0]
+host = params.get("host", [""])[0]
+path = params.get("path", ["/"])[0]
 
+sni = unquote(sni)
 host = unquote(host)
 path = unquote(path)
 
-fp = q.get("fp", [""])[0]
+fingerprint = params.get("fp", [""])[0]
 
+# --------------------------------------------------------------
+# VLESS outbound
+# --------------------------------------------------------------
 outbound = {
     "type": "vless",
-    "tag": "proxy-out",
+    "tag": "vless-out",
     "server": server,
     "server_port": port,
     "uuid": uuid,
-    "tls": {
-        "enabled": security == "tls",
-        "server_name": sni
-    }
 }
 
-# Safari / Chrome 等 uTLS 指纹
-if fp:
-    outbound["tls"]["utls"] = {
+# --------------------------------------------------------------
+# TLS
+# --------------------------------------------------------------
+if security == "tls":
+    outbound["tls"] = {
         "enabled": True,
-        "fingerprint": fp
+        "server_name": sni,
     }
 
+    if fingerprint:
+        outbound["tls"]["utls"] = {
+            "enabled": True,
+            "fingerprint": fingerprint,
+        }
+
+# --------------------------------------------------------------
 # WebSocket
+# --------------------------------------------------------------
 if network == "ws":
     transport = {
         "type": "ws",
-        "path": path
+        "path": path,
     }
 
     if host:
@@ -161,6 +245,16 @@ if network == "ws":
 
     outbound["transport"] = transport
 
+elif network != "tcp":
+    print(f"⚠️ 未特殊处理传输类型: {network}")
+
+# --------------------------------------------------------------
+# Mixed inbound
+#
+# sing-box mixed 同时提供:
+# SOCKS4 / SOCKS4A / SOCKS5 / HTTP
+# 因此 Python requests 可以直接使用 HTTP proxy。
+# --------------------------------------------------------------
 config = {
     "log": {
         "level": "info"
@@ -168,8 +262,8 @@ config = {
 
     "inbounds": [
         {
-            "type": "socks",
-            "tag": "socks-in",
+            "type": "mixed",
+            "tag": "proxy-in",
             "listen": "127.0.0.1",
             "listen_port": 10808
         }
@@ -184,45 +278,83 @@ config = {
     ]
 }
 
-with open("sing-box.json", "w", encoding="utf-8") as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
+with open(
+    "sing-box.json",
+    "w",
+    encoding="utf-8"
+) as f:
+    json.dump(
+        config,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
 
 print("✅ sing-box 配置生成成功")
-print(f"   Server: {server}:{port}")
-print(f"   SNI: {sni}")
-print(f"   Network: {network}")
-print(f"   WS Host: {host}")
-print(f"   WS Path: {path}")
-print(f"   SOCKS5: 127.0.0.1:10808")
+print(f"   Server     : {server}:{port}")
+print(f"   UUID       : {uuid[:8]}******")
+print(f"   TLS        : {security}")
+print(f"   SNI        : {sni}")
+print(f"   Network    : {network}")
+print(f"   WS Host    : {host}")
+print(f"   WS Path    : {path}")
+print("   Mixed HTTP : 127.0.0.1:10808")
+print("   Mixed SOCKS: 127.0.0.1:10808")
 PY
 
+            # --------------------------------------------------
+            # 配置检查
+            # --------------------------------------------------
             echo "🔍 检查 sing-box 配置"
 
             "$SINGBOX_BIN" check \
               -c sing-box.json
 
+            echo "✅ 配置检查通过"
+
+            # --------------------------------------------------
+            # 启动 sing-box
+            # --------------------------------------------------
             echo "🚀 启动 sing-box"
 
             nohup "$SINGBOX_BIN" run \
               -c sing-box.json \
               > sing-box.log 2>&1 &
 
-            echo $! > sing-box.pid
+            SINGBOX_PID=$!
+            echo "$SINGBOX_PID" > sing-box.pid
 
             sleep 3
 
+            if ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
+              echo "❌ sing-box 启动失败"
+              echo "========== sing-box.log =========="
+              cat sing-box.log || true
+              echo "=================================="
+              exit 1
+            fi
+
+            echo "✅ sing-box PID: $SINGBOX_PID"
+
+            # --------------------------------------------------
+            # 测试 HTTP 代理
+            # --------------------------------------------------
             echo "🔎 测试 VLESS 出口"
 
-            if curl -fsS \
-              --socks5-hostname 127.0.0.1:10808 \
+            if curl -fsSL \
+              --proxy http://127.0.0.1:10808 \
               https://api.ipify.org \
-              > /tmp/vless_ip.txt
+              -o /tmp/vless_ip.txt
             then
-              IP=$(cat /tmp/vless_ip.txt)
+              VLESS_IP="$(cat /tmp/vless_ip.txt)"
+
+              if [ -z "$VLESS_IP" ]; then
+                echo "❌ 获取到空出口 IP"
+                exit 1
+              fi
 
               echo "✅ VLESS 代理连接成功"
-              echo "🌐 出口 IP: ${IP}"
-
+              echo "🌐 出口 IP: ${VLESS_IP}"
             else
               echo "❌ VLESS 代理连接失败"
               echo "========== sing-box.log =========="
@@ -231,98 +363,152 @@ PY
               exit 1
             fi
 
-            # ------------------------------------------------
-            # 给 monkeybytes.py 使用
-            # ------------------------------------------------
-
-            echo "PROXY_TYPE=vless" >> "$GITHUB_ENV"
-            echo "HTTP_PROXY=http://127.0.0.1:10808" >> "$GITHUB_ENV"
-            echo "HTTPS_PROXY=http://127.0.0.1:10808" >> "$GITHUB_ENV"
+            # --------------------------------------------------
+            # 导出给后续步骤
+            # --------------------------------------------------
+            {
+              echo "PROXY_TYPE=vless"
+              echo "HTTP_PROXY=http://127.0.0.1:10808"
+              echo "HTTPS_PROXY=http://127.0.0.1:10808"
+            } >> "$GITHUB_ENV"
 
             exit 0
           fi
 
-          # ==================================================
-          # 非 VLESS
-          # 使用原来的 GOST
-          # ==================================================
+          # ====================================================
+          # 其他代理：使用 GOST
+          # ====================================================
 
           echo "🟢 未检测到 VLESS"
           echo "🚀 使用 GOST"
 
-          VERSION=$(curl -fsSL \
-            https://api.github.com/repos/ginuerzh/gost/releases/latest \
-            | grep '"tag_name"' \
-            | head -1 \
-            | cut -d'"' -f4 \
-            | tr -d 'v')
+          GOST_TAG="$(
+            curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              https://api.github.com/repos/ginuerzh/gost/releases/latest \
+              | python -c '
+import json,sys
+print(json.load(sys.stdin)["tag_name"])
+'
+          )"
 
-          echo "📦 GOST 版本: $VERSION"
+          if [ -z "$GOST_TAG" ]; then
+            echo "❌ 无法获取 GOST 版本"
+            exit 1
+          fi
 
-          wget -q \
-            "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz" \
-            -O gost.tar.gz
+          GOST_VERSION="${GOST_TAG#v}"
+
+          echo "📦 GOST: ${GOST_VERSION}"
+
+          GOST_ARCHIVE="gost_${GOST_VERSION}_linux_amd64.tar.gz"
+
+          curl -fL \
+            --retry 3 \
+            --retry-delay 2 \
+            "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/${GOST_ARCHIVE}" \
+            -o gost.tar.gz
 
           tar -xzf gost.tar.gz
 
-          chmod +x gost
+          GOST_BIN="$(
+            find . \
+              -maxdepth 3 \
+              -type f \
+              -name gost \
+              -print -quit
+          )"
 
-          nohup ./gost \
+          if [ -z "$GOST_BIN" ]; then
+            echo "❌ 未找到 GOST"
+            exit 1
+          fi
+
+          chmod +x "$GOST_BIN"
+
+          echo "🚀 启动 GOST"
+
+          nohup "$GOST_BIN" \
             -L http://:8080 \
             -F "$GOST_PROXY" \
             > gost.log 2>&1 &
 
-          echo $! > gost.pid
+          GOST_PID=$!
+          echo "$GOST_PID" > gost.pid
 
           sleep 3
 
-          echo "🔎 测试 GOST 出口"
-
-          if curl -fsS \
-            -x http://127.0.0.1:8080 \
-            https://api.ipify.org \
-            > /tmp/gost_ip.txt
-          then
-            IP=$(cat /tmp/gost_ip.txt)
-
-            echo "✅ GOST 代理连接成功"
-            echo "🌐 出口 IP: ${IP}"
-
-          else
-            echo "❌ GOST 代理连接失败"
+          if ! kill -0 "$GOST_PID" 2>/dev/null; then
+            echo "❌ GOST 启动失败"
             cat gost.log || true
             exit 1
           fi
 
-          echo "PROXY_TYPE=gost" >> "$GITHUB_ENV"
-          echo "HTTP_PROXY=http://127.0.0.1:8080" >> "$GITHUB_ENV"
-          echo "HTTPS_PROXY=http://127.0.0.1:8080" >> "$GITHUB_ENV"
+          echo "✅ GOST PID: $GOST_PID"
+
+          echo "🔎 测试 GOST 出口"
+
+          if curl -fsSL \
+            --proxy http://127.0.0.1:8080 \
+            https://api.ipify.org \
+            -o /tmp/gost_ip.txt
+          then
+            GOST_IP="$(cat /tmp/gost_ip.txt)"
+
+            echo "✅ GOST 代理连接成功"
+            echo "🌐 出口 IP: ${GOST_IP}"
+          else
+            echo "❌ GOST 代理连接失败"
+            echo "========== gost.log =========="
+            cat gost.log || true
+            echo "=============================="
+            exit 1
+          fi
+
+          {
+            echo "PROXY_TYPE=gost"
+            echo "HTTP_PROXY=http://127.0.0.1:8080"
+            echo "HTTPS_PROXY=http://127.0.0.1:8080"
+          } >> "$GITHUB_ENV"
 
       # ======================================================
       # 执行 MonkeyBytes
       # ======================================================
-
       - name: 🤖 执行自动化脚本
+        shell: bash
         env:
           MONKEY_ACCOUNT: ${{ secrets.MONKEY_ACCOUNT }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
-          HTTP_PROXY: ${{ env.HTTP_PROXY }}
-          HTTPS_PROXY: ${{ env.HTTPS_PROXY }}
-          PROXY_TYPE: ${{ env.PROXY_TYPE }}
         run: |
+          set -Eeuo pipefail
+
           echo "=========================================="
           echo "🐒 MonkeyBytes"
           echo "=========================================="
 
           echo "代理类型: ${PROXY_TYPE:-direct}"
-          echo "HTTP_PROXY: ${HTTP_PROXY:-未设置}"
-          echo "HTTPS_PROXY: ${HTTPS_PROXY:-未设置}"
+
+          if [ -n "${HTTP_PROXY:-}" ]; then
+            echo "HTTP代理: 已启用"
+          else
+            echo "HTTP代理: 未启用"
+          fi
+
+          if [ -n "${HTTPS_PROXY:-}" ]; then
+            echo "HTTPS代理: 已启用"
+          else
+            echo "HTTPS代理: 未启用"
+          fi
 
           python -u monkeybytes.py
 
+      # ======================================================
+      # 清理
+      # ======================================================
       - name: 🧹 清理代理
         if: always()
+        shell: bash
         run: |
           if [ -f sing-box.pid ]; then
             kill "$(cat sing-box.pid)" 2>/dev/null || true
