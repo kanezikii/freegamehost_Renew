@@ -22,8 +22,7 @@ jobs:
           token: ${{ secrets.PRIVATE_PAT }}
           path: private
 
-      - name: 📂 复制脚本到根目录
-        shell: bash
+      - name: 📂 准备脚本
         run: |
           set -e
           test -f private/monkeybytes.py
@@ -33,25 +32,100 @@ jobs:
           ls -lh ./monkeybytes.py
 
       # ======================================================
-      # 2. Python 环境与依赖
+      # 2. 安装 Python 依赖
       # ======================================================
-      - name: 🐍 安装 Python 环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: 📦 安装 Python 依赖
-        shell: bash
         run: |
-          set -e
-          python -m pip install --upgrade pip
-          python -m pip install requests
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests
 
       # ======================================================
-      # 3. 自动识别代理并启动 (VLESS -> sing-box / 其他 -> GOST)
+      # 3. 生成 sing-box 配置 (原生 Python 运行，彻底解决引号冲突)
+      # ======================================================
+      - name: ⚙️ 生成 sing-box 配置
+        if: startsWith(secrets.GOST_PROXY, 'vless://')
+        shell: python
+        env:
+          VLESS_URI: ${{ secrets.GOST_PROXY }}
+        run: |
+          import json
+          import os
+          import sys
+          from urllib.parse import urlparse, parse_qs, unquote
+
+          uri = os.environ.get("VLESS_URI", "").strip()
+          parsed = urlparse(uri)
+
+          if parsed.scheme.lower() != "vless":
+              print("❌ 不是有效的 VLESS 链接")
+              sys.exit(1)
+
+          uuid = parsed.username
+          server = parsed.hostname
+          port = parsed.port
+
+          if not uuid or not server or not port:
+              print("❌ VLESS 节点配置不完整")
+              sys.exit(1)
+
+          params = parse_qs(parsed.query)
+          security = params.get("security", ["none"])[0].lower()
+          network = params.get("type", ["tcp"])[0].lower()
+          sni = unquote(params.get("sni", [server])[0])
+          host = unquote(params.get("host", [""])[0])
+          path = unquote(params.get("path", ["/"])[0])
+          fingerprint = params.get("fp", [""])[0]
+
+          outbound = {
+              "type": "vless",
+              "tag": "vless-out",
+              "server": server,
+              "server_port": port,
+              "uuid": uuid,
+          }
+
+          if security == "tls":
+              outbound["tls"] = {
+                  "enabled": True,
+                  "server_name": sni,
+              }
+              if fingerprint:
+                  outbound["tls"]["utls"] = {
+                      "enabled": True,
+                      "fingerprint": fingerprint,
+                  }
+
+          if network == "ws":
+              transport = {"type": "ws", "path": path}
+              if host:
+                  transport["headers"] = {"Host": host}
+              outbound["transport"] = transport
+
+          config = {
+              "log": {"level": "warn"},
+              "inbounds": [
+                  {
+                      "type": "mixed",
+                      "tag": "proxy-in",
+                      "listen": "127.0.0.1",
+                      "listen_port": 10808,
+                  }
+              ],
+              "outbounds": [
+                  outbound,
+                  {"type": "direct", "tag": "direct"},
+              ],
+          }
+
+          with open("sing-box.json", "w", encoding="utf-8") as f:
+              json.dump(config, f, ensure_ascii=False, indent=2)
+
+          print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
+
+      # ======================================================
+      # 4. 启动代理服务 (sing-box / GOST / 直连)
       # ======================================================
       - name: 🛡️ 启动代理服务
-        shell: bash
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
@@ -67,124 +141,28 @@ jobs:
             exit 0
           fi
 
-          # ----------------------------------------------------
-          # 3.1 VLESS 节点 -> sing-box
-          # ----------------------------------------------------
           if [[ "$GOST_PROXY" == vless://* ]]; then
             echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
 
             SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-
-            if [ -z "$SB_TAG" ]; then
-              echo "❌ 无法获取 sing-box 版本"
-              exit 1
-            fi
-
             SB_VERSION="${SB_TAG#v}"
             echo "📦 sing-box 版本: ${SB_TAG}"
 
-            SB_ARCHIVE="sing-box-${SB_VERSION}-linux-amd64.tar.gz"
-            SB_URL="https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/${SB_ARCHIVE}"
-
-            echo "⬇️ 正在下载: $SB_URL"
-            curl -fL --retry 3 --retry-delay 2 "$SB_URL" -o sing-box.tar.gz
-
-            rm -rf sing-box-extract
+            curl -fsSL --retry 3 "https://github.com/SagerNet/sing-box/releases/download/${SB_TAG}/sing-box-${SB_VERSION}-linux-amd64.tar.gz" -o sing-box.tar.gz
             mkdir -p sing-box-extract
             tar -xzf sing-box.tar.gz -C sing-box-extract
-
             SINGBOX_BIN="$(find sing-box-extract -type f -name sing-box -print -quit)"
-            if [ -z "$SINGBOX_BIN" ]; then
-              echo "❌ 未找到 sing-box 可执行文件"
-              exit 1
-            fi
             chmod +x "$SINGBOX_BIN"
-
-            export VLESS_URI="$GOST_PROXY"
-            python3 -c '
-import json, os, sys
-from urllib.parse import urlparse, parse_qs, unquote
-
-uri = os.environ.get("VLESS_URI", "").strip()
-parsed = urlparse(uri)
-
-if parsed.scheme.lower() != "vless":
-    print("❌ GOST_PROXY 不是有效 VLESS 链接")
-    sys.exit(1)
-
-uuid = parsed.username
-server = parsed.hostname
-port = parsed.port
-
-if not uuid or not server or not port:
-    print("❌ VLESS 节点配置不完整")
-    sys.exit(1)
-
-params = parse_qs(parsed.query)
-security = params.get("security", ["none"])[0].lower()
-network = params.get("type", ["tcp"])[0].lower()
-sni = unquote(params.get("sni", [server])[0])
-host = unquote(params.get("host", [""])[0])
-path = unquote(params.get("path", ["/"])[0])
-fingerprint = params.get("fp", [""])[0]
-
-outbound = {
-    "type": "vless",
-    "tag": "vless-out",
-    "server": server,
-    "server_port": port,
-    "uuid": uuid,
-}
-
-if security == "tls":
-    outbound["tls"] = {
-        "enabled": True,
-        "server_name": sni,
-    }
-    if fingerprint:
-        outbound["tls"]["utls"] = {
-            "enabled": True,
-            "fingerprint": fingerprint,
-        }
-
-if network == "ws":
-    transport = {"type": "ws", "path": path}
-    if host:
-        transport["headers"] = {"Host": host}
-    outbound["transport"] = transport
-
-config = {
-    "log": {"level": "warn"},
-    "inbounds": [
-        {
-            "type": "mixed",
-            "tag": "proxy-in",
-            "listen": "127.0.0.1",
-            "listen_port": 10808
-        }
-    ],
-    "outbounds": [
-        outbound,
-        {"type": "direct", "tag": "direct"}
-    ]
-}
-
-with open("sing-box.json", "w", encoding="utf-8") as f:
-    json.dump(config, f, ensure_ascii=False, indent=2)
-
-print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
-'
 
             echo "🔍 检查 sing-box 配置"
             "$SINGBOX_BIN" check -c sing-box.json
 
             echo "🚀 启动 sing-box"
             nohup "$SINGBOX_BIN" run -c sing-box.json > sing-box.log 2>&1 &
-            SINGBOX_PID=$!
-            echo "$SINGBOX_PID" > sing-box.pid
+            echo "$!" > sing-box.pid
             sleep 3
 
-            if ! kill -0 "$SINGBOX_PID" 2>/dev/null; then
+            if ! kill -0 "$(<sing-box.pid)" 2>/dev/null; then
               echo "❌ sing-box 启动失败"
               cat sing-box.log || true
               exit 1
@@ -207,39 +185,22 @@ print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
             exit 0
           fi
 
-          # ----------------------------------------------------
-          # 3.2 常规代理 -> GOST
-          # ----------------------------------------------------
           echo "🟢 检测到常规代理，准备启动 GOST"
-
           GOST_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ginuerzh/gost/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-
-          if [ -z "$GOST_TAG" ]; then
-            echo "❌ 无法获取 GOST 版本"
-            exit 1
-          fi
-
           GOST_VERSION="${GOST_TAG#v}"
           echo "📦 GOST 版本: ${GOST_VERSION}"
 
-          GOST_ARCHIVE="gost_${GOST_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 --retry-delay 2 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/${GOST_ARCHIVE}" -o gost.tar.gz
+          curl -fsSL --retry 3 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/gost_${GOST_VERSION}_linux_amd64.tar.gz" -o gost.tar.gz
           tar -xzf gost.tar.gz
-
           GOST_BIN="$(find . -maxdepth 3 -type f -name gost -print -quit)"
-          if [ -z "$GOST_BIN" ]; then
-            echo "❌ 未找到 GOST 可执行文件"
-            exit 1
-          fi
           chmod +x "$GOST_BIN"
 
           echo "🚀 启动 GOST 转发"
           nohup "$GOST_BIN" -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          GOST_PID=$!
-          echo "$GOST_PID" > gost.pid
+          echo "$!" > gost.pid
           sleep 3
 
-          if ! kill -0 "$GOST_PID" 2>/dev/null; then
+          if ! kill -0 "$(<gost.pid)" 2>/dev/null; then
             echo "❌ GOST 启动失败"
             cat gost.log || true
             exit 1
@@ -261,37 +222,27 @@ print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
           } >> "$GITHUB_ENV"
 
       # ======================================================
-      # 4. 执行自动化续期脚本
+      # 5. 执行自动化续期脚本
       # ======================================================
       - name: 🤖 执行自动化脚本
-        shell: bash
         env:
           MONKEY_ACCOUNT: ${{ secrets.MONKEY_ACCOUNT }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: |
           set -Eeuo pipefail
-
           echo "=========================================="
           echo "🐒 MonkeyBytes 任务运行中"
-          echo "=========================================="
           echo "代理类型: ${PROXY_TYPE:-direct}"
           echo "代理地址: ${HTTP_PROXY:-直连模式}"
           echo "=========================================="
-
-          python -u monkeybytes.py
+          python3 -u monkeybytes.py
 
       # ======================================================
-      # 5. 清理后台代理进程
+      # 6. 清理代理进程
       # ======================================================
       - name: 🧹 清理代理进程
         if: always()
-        shell: bash
         run: |
-          if [ -f sing-box.pid ]; then
-            kill "$(cat sing-box.pid)" 2>/dev/null || true
-          fi
-
-          if [ -f gost.pid ]; then
-            kill "$(cat gost.pid)" 2>/dev/null || true
-          fi
+          if [ -f sing-box.pid ]; then kill "$(<sing-box.pid)" 2>/dev/null || true; fi
+          if [ -f gost.pid ]; then kill "$(<gost.pid)" 2>/dev/null || true; fi
