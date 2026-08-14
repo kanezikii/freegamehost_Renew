@@ -17,7 +17,7 @@ jobs:
       - name: 📥 拉取代码
         uses: actions/checkout@v4
         with:
-          repository: kanezikii/fgh_Renew
+          repository: fgh_Renew/monkeybytes.py
           token: ${{ secrets.PRIVATE_PAT }}
 
       - name: 🐍 设置 Python
