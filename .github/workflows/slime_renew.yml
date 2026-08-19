@@ -17,7 +17,7 @@ jobs:
       - name: 📥 拉取代码
         uses: actions/checkout@v4
         with:
-          repository: fgh_Renew/slime_renew.py
+          repository: kanezikii/fgh_Renew
           token: ${{ secrets.PRIVATE_PAT }}
 
       - name: 🐍 设置 Python
