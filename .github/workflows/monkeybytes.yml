@@ -5,7 +5,6 @@ on:
     - cron: '0 1 * * *'  # 每天 UTC 01:00 执行（对应北京时间 09:00）
   workflow_dispatch:
 
-# 赋予工作流操作 Actions 与 Secrets 的写入权限
 permissions:
   actions: write
   contents: read
@@ -262,16 +261,22 @@ jobs:
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 6. 清理旧工作流历史记录 (只保留本次运行)
+      # 6. 清理旧工作流历史记录 (强制直连 GitHub API，只保留本次)
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          http_proxy: ""
+          https_proxy: ""
+          ALL_PROXY: ""
+          all_proxy: ""
         run: |
           echo "🧹 正在清理旧记录（仅保留当前这一次）..."
           
-          # 获取除了当前运行 ID 之外的所有历史 Runs (单次最多取 100 条)
+          # 获取除了当前运行 ID 之外的所有历史 Runs
           OLD_RUNS=$(gh api --paginate "/repos/${{ github.repository }}/actions/runs?per_page=100" \
             --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id") || true
 
