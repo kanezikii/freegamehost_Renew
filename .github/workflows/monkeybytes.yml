@@ -44,7 +44,7 @@ jobs:
           python3 -m pip install requests
 
       # ======================================================
-      # 3. 自动识别代理并启动 (VLESS -> sing-box / 其他 -> GOST)
+      # 3. 自动识别代理并启动 
       # ======================================================
       - name: 🛡️ 启动代理服务
         env:
@@ -63,7 +63,7 @@ jobs:
           fi
 
           # ----------------------------------------------------
-          # 3.1 VLESS 节点 -> sing-box
+          # 3.1 点sing-box
           # ----------------------------------------------------
           if [[ "$GOST_PROXY" == vless://* ]]; then
             echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
@@ -188,7 +188,7 @@ jobs:
           fi
 
           # ----------------------------------------------------
-          # 3.2 常规代理 -> GOST
+          # 3.2 GOST
           # ----------------------------------------------------
           echo "🟢 检测到常规代理，准备启动 GOST"
 
@@ -261,21 +261,18 @@ jobs:
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 6. 清理旧工作流历史记录 (强制直连 GitHub API，只保留本次)
+      # 6. 清理旧工作流历史记录 
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
-          HTTP_PROXY: ""
-          HTTPS_PROXY: ""
-          http_proxy: ""
-          https_proxy: ""
-          ALL_PROXY: ""
-          all_proxy: ""
         run: |
+          # 彻底清除所有代理环境变量，确保直连 GitHub API
+          unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+
           echo "🧹 正在清理旧记录（仅保留当前这一次）..."
-          
+
           # 获取除了当前运行 ID 之外的所有历史 Runs
           OLD_RUNS=$(gh api --paginate "/repos/${{ github.repository }}/actions/runs?per_page=100" \
             --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id") || true
