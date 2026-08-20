@@ -230,7 +230,8 @@ jobs:
         env:
           MONKEY_ACCOUNT: ${{ secrets.MONKEY_ACCOUNT }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
-          TG_BOT: ${{ secrets.TG_BOT }}
+          # 直接读取现有的两个 Secret 自动组合
+          TG_BOT: ${{ secrets.TG_BOT_TOKEN }}#${{ secrets.TG_CHAT_ID }}
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
