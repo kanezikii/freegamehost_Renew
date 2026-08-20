@@ -40,7 +40,7 @@ jobs:
           python3 -m pip install requests
 
       # ======================================================
-      # 3. 自动识别代理并启动 (VLESS -> sing-box / 其他 -> GOST)
+      # 3. 自动识别代理并启动 
       # ======================================================
       - name: 🛡️ 启动代理服务
         env:
@@ -192,8 +192,7 @@ jobs:
           GOST_VERSION="${GOST_TAG#v}"
           echo "📦 GOST 版本: ${GOST_VERSION}"
 
-          GOST_ARCHIVE="gost_${GOST_VERSION}_linux_amd64.tar.gz"
-          curl -fL --retry 3 --retry-delay 2 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/${GOST_ARCHIVE}" -o gost.tar.gz
+          curl -fL --retry 3 --retry-delay 2 "https://github.com/ginuerzh/gost/releases/download/${GOST_TAG}/${GOST_ARCHIVE:-gost_${GOST_VERSION}_linux_amd64.tar.gz}" -o gost.tar.gz
           tar -xzf gost.tar.gz
           GOST_BIN="$(find . -maxdepth 3 -type f -name gost -print -quit)"
           chmod +x "$GOST_BIN"
@@ -225,7 +224,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # ======================================================
-      # 4. 执行自动化续期脚本 (注入 GH_TOKEN 与 仓库信息)
+      # 4. 执行自动化续期脚本
       # ======================================================
       - name: 🤖 执行自动化脚本
         env:
@@ -258,17 +257,18 @@ jobs:
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 6. 清理旧工作流记录 (仅保留最近 5 次)
+      # 6. 清理旧工作流记录
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
         run: |
-          echo "🧹 正在清理旧的工作流历史（保留最近 5 次）..."
-          RUN_IDS=$(gh run list --workflow=monkeybytes.yml --limit 50 --json databaseId,status -q '.[] | select(.status=="completed") | .databaseId' | sed -e '1,5d') || true
-          if [ -n "$RUN_IDS" ]; then
-            for run_id in $RUN_IDS; do
+          echo "🧹 正在清理旧的工作流历史"
+          OLD_RUNS=$(gh run list --repo "${{ github.repository }}" --workflow=monkeybytes.yml --limit 100 --json databaseId -q '.[5:] | .[].databaseId') || true
+          if [ -n "$OLD_RUNS" ]; then
+            for run_id in $OLD_RUNS; do
+              echo "🗑️ 正在删除 Run ID: $run_id"
               gh run delete "$run_id" --repo "${{ github.repository }}" >/dev/null 2>&1 || true
             done
             echo "✅ 历史工作流运行记录已清理完毕"
