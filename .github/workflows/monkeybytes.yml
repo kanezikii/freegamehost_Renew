@@ -2,7 +2,7 @@ name: MonkeyBytes
 
 on:
   schedule:
-    - cron: '0 10 */3 * *'  # 每3天 UTC 01:00 执行（对应北京时间 09:00）
+    - cron: '0 1 * * *'  # 每天 UTC 01:00 执行（对应北京时间 09:00）
   workflow_dispatch:
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
           python3 -m pip install requests
 
       # ======================================================
-      # 3. 自动识别代理并启动 
+      # 3. 自动识别代理并启动 (sing-box 统一接管 Hy2/VLESS/Trojan 等)
       # ======================================================
       - name: 🛡️ 启动代理服务
         env:
@@ -63,10 +63,10 @@ jobs:
           fi
 
           # ----------------------------------------------------
-          # 3.1 点sing-box
+          # 3.1 Hysteria2 / VLESS / Trojan / Socks / HTTP -> sing-box
           # ----------------------------------------------------
-          if [[ "$GOST_PROXY" == vless://* ]]; then
-            echo "🔵 检测到 VLESS 节点，准备启动 sing-box"
+          if [[ "$GOST_PROXY" =~ ^(hysteria2|hy2|vless|trojan|socks5|socks|http|https):// ]]; then
+            echo "🔵 检测到标准代理链接，准备启动 sing-box 多协议引擎"
 
             SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
             SB_VERSION="${SB_TAG#v}"
@@ -78,6 +78,7 @@ jobs:
             SINGBOX_BIN="$(find sing-box-extract -type f -name sing-box -print -quit)"
             chmod +x "$SINGBOX_BIN"
 
+            # 动态多协议解析转换引擎
             cat << 'EOF' > make_singbox.py
           import json
           import os
@@ -86,51 +87,133 @@ jobs:
 
           uri = os.environ.get("GOST_PROXY", "").strip()
           parsed = urlparse(uri)
+          scheme = parsed.scheme.lower()
 
-          if parsed.scheme.lower() != "vless":
-              print("❌ 不是有效的 VLESS 链接")
-              sys.exit(1)
-
-          uuid = parsed.username
           server = parsed.hostname
           port = parsed.port
-
-          if not uuid or not server or not port:
-              print("❌ VLESS 节点配置不完整")
-              sys.exit(1)
-
+          user = unquote(parsed.username or "")
+          password = unquote(parsed.password or "")
           params = parse_qs(parsed.query)
-          security = params.get("security", ["none"])[0].lower()
-          network = params.get("type", ["tcp"])[0].lower()
-          sni = unquote(params.get("sni", [server])[0])
-          host = unquote(params.get("host", [""])[0])
-          path = unquote(params.get("path", ["/"])[0])
-          fingerprint = params.get("fp", [""])[0]
 
-          outbound = {
-              "type": "vless",
-              "tag": "vless-out",
-              "server": server,
-              "server_port": port,
-              "uuid": uuid,
-          }
+          sni = unquote(params.get("sni", [server or ""])[0])
+          insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0].lower() in ("1", "true", "yes")
 
-          if security == "tls":
-              outbound["tls"] = {
-                  "enabled": True,
-                  "server_name": sni,
-              }
-              if fingerprint:
-                  outbound["tls"]["utls"] = {
+          outbound = None
+
+          # Hysteria 2 / Hy2
+          if scheme in ("hysteria2", "hy2"):
+              auth_secret = user or password
+              outbound = {
+                  "type": "hysteria2",
+                  "tag": "proxy-out",
+                  "server": server,
+                  "server_port": port,
+                  "password": auth_secret,
+                  "tls": {
                       "enabled": True,
-                      "fingerprint": fingerprint,
+                      "server_name": sni if sni else server,
+                      "insecure": insecure,
+                  },
+              }
+              obfs_type = params.get("obfs", [""])[0]
+              obfs_password = params.get("obfs-password", [""])[0]
+              if obfs_type:
+                  outbound["obfs"] = {
+                      "type": obfs_type,
+                      "password": obfs_password,
                   }
 
-          if network == "ws":
-              transport = {"type": "ws", "path": path}
-              if host:
-                  transport["headers"] = {"Host": host}
-              outbound["transport"] = transport
+          # VLESS
+          elif scheme == "vless":
+              uuid = user
+              security = params.get("security", ["none"])[0].lower()
+              network = params.get("type", ["tcp"])[0].lower()
+              host = unquote(params.get("host", [""])[0])
+              path = unquote(params.get("path", ["/"])[0])
+              fingerprint = params.get("fp", [""])[0]
+
+              outbound = {
+                  "type": "vless",
+                  "tag": "proxy-out",
+                  "server": server,
+                  "server_port": port,
+                  "uuid": uuid,
+              }
+              if security == "tls":
+                  outbound["tls"] = {
+                      "enabled": True,
+                      "server_name": sni if sni else server,
+                      "insecure": insecure,
+                  }
+                  if fingerprint:
+                      outbound["tls"]["utls"] = {
+                          "enabled": True,
+                          "fingerprint": fingerprint,
+                      }
+              if network == "ws":
+                  transport = {"type": "ws", "path": path}
+                  if host:
+                      transport["headers"] = {"Host": host}
+                  outbound["transport"] = transport
+
+          # Trojan
+          elif scheme == "trojan":
+              outbound = {
+                  "type": "trojan",
+                  "tag": "proxy-out",
+                  "server": server,
+                  "server_port": port,
+                  "password": user or password,
+                  "tls": {
+                      "enabled": True,
+                      "server_name": sni if sni else server,
+                      "insecure": insecure,
+                  },
+              }
+              network = params.get("type", ["tcp"])[0].lower()
+              if network == "ws":
+                  host = unquote(params.get("host", [""])[0])
+                  path = unquote(params.get("path", ["/"])[0])
+                  transport = {"type": "ws", "path": path}
+                  if host:
+                      transport["headers"] = {"Host": host}
+                  outbound["transport"] = transport
+
+          # Socks5
+          elif scheme in ("socks5", "socks"):
+              outbound = {
+                  "type": "socks",
+                  "tag": "proxy-out",
+                  "server": server,
+                  "server_port": port,
+              }
+              if user:
+                  outbound["username"] = user
+              if password:
+                  outbound["password"] = password
+
+          # HTTP / HTTPS
+          elif scheme in ("http", "https"):
+              outbound = {
+                  "type": "http",
+                  "tag": "proxy-out",
+                  "server": server,
+                  "server_port": port,
+              }
+              if scheme == "https":
+                  outbound["tls"] = {
+                      "enabled": True,
+                      "server_name": sni if sni else server,
+                      "insecure": insecure,
+                  }
+              if user:
+                  outbound["username"] = user
+              if password:
+                  outbound["password"] = password
+
+          if not outbound:
+              print(f"❌ 不支持的节点协议: {scheme}")
+              sys.exit(1)
 
           config = {
               "log": {"level": "warn"},
@@ -151,7 +234,7 @@ jobs:
           with open("sing-box.json", "w", encoding="utf-8") as f:
               json.dump(config, f, ensure_ascii=False, indent=2)
 
-          print("✅ sing-box.json 配置生成成功 (监听 127.0.0.1:10808)")
+          print(f"✅ sing-box.json 配置生成成功 [{scheme.upper()}] (监听 127.0.0.1:10808)")
           EOF
 
             python3 make_singbox.py
@@ -170,17 +253,17 @@ jobs:
               exit 1
             fi
 
-            echo "🔎 测试 VLESS 出口连通性"
-            if curl -fsSL --proxy http://127.0.0.1:10808 https://api.ipify.org -o /tmp/vless_ip.txt; then
-              echo "✅ VLESS 代理连接成功，出口 IP: $(cat /tmp/vless_ip.txt)"
+            echo "🔎 测试节点出口连通性"
+            if curl -fsSL --proxy http://127.0.0.1:10808 https://api.ipify.org -o /tmp/proxy_ip.txt; then
+              echo "✅ 代理连接成功，出口 IP: $(cat /tmp/proxy_ip.txt)"
             else
-              echo "❌ VLESS 代理测试失败"
+              echo "❌ 代理测试失败"
               cat sing-box.log || true
               exit 1
             fi
 
             {
-              echo "PROXY_TYPE=vless"
+              echo "PROXY_TYPE=sing-box"
               echo "HTTP_PROXY=http://127.0.0.1:10808"
               echo "HTTPS_PROXY=http://127.0.0.1:10808"
             } >> "$GITHUB_ENV"
@@ -188,9 +271,9 @@ jobs:
           fi
 
           # ----------------------------------------------------
-          # 3.2 GOST
+          # 3.2 特殊转发协议 -> GOST 回退
           # ----------------------------------------------------
-          echo "🟢 检测到常规代理，准备启动 GOST"
+          echo "🟢 检测到特殊代理，准备启动 GOST 转发"
 
           GOST_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ginuerzh/gost/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
           GOST_VERSION="${GOST_TAG#v}"
@@ -213,8 +296,8 @@ jobs:
           fi
 
           echo "🔎 测试 GOST 出口连通性"
-          if curl -fsSL --proxy http://127.0.0.1:8080 https://api.ipify.org -o /tmp/gost_ip.txt; then
-            echo "✅ GOST 代理连接成功，出口 IP: $(cat /tmp/gost_ip.txt)"
+          if curl -fsSL --proxy http://127.0.0.1:8080 https://api.ipify.org -o /tmp/proxy_ip.txt; then
+            echo "✅ GOST 代理连接成功，出口 IP: $(cat /tmp/proxy_ip.txt)"
           else
             echo "❌ GOST 代理测试失败"
             cat gost.log || true
@@ -257,22 +340,22 @@ jobs:
           if [ -f gost.pid ]; then kill -9 "$(<gost.pid)" 2>/dev/null || true; fi
           pkill -9 -f sing-box 2>/dev/null || true
           pkill -9 -f gost 2>/dev/null || true
-          rm -f sing-box.pid gost.pid sing-box.log gost.log make_singbox.py /tmp/vless_ip.txt /tmp/gost_ip.txt || true
+          rm -f sing-box.pid gost.pid sing-box.log gost.log make_singbox.py /tmp/proxy_ip.txt || true
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 6. 清理旧工作流历史记录 
+      # 6. 清理旧工作流历史记录 (强制直连 GitHub API，只保留本次)
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
         run: |
-          # 彻底清除所有代理环境变量，确保直连 GitHub API
+          # 彻底清除代理环境变量，确保直连 GitHub API
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
 
           echo "🧹 正在清理旧记录（仅保留当前这一次）..."
-
+          
           # 获取除了当前运行 ID 之外的所有历史 Runs
           OLD_RUNS=$(gh api --paginate "/repos/${{ github.repository }}/actions/runs?per_page=100" \
             --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id") || true
