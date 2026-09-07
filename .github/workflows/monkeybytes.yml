@@ -44,7 +44,7 @@ jobs:
           python3 -m pip install requests
 
       # ======================================================
-      # 3. 自动识别代理并启动 (sing-box 统一接管 Hy2/VLESS/Trojan 等)
+      # 3. 自动识别代理并启动 (sing-box 多协议引擎接管)[cite: 1]
       # ======================================================
       - name: 🛡️ 启动代理服务
         env:
@@ -62,11 +62,8 @@ jobs:
             exit 0
           fi
 
-          # ----------------------------------------------------
-          # 3.1 Hysteria2 / VLESS / Trojan / Socks / HTTP -> sing-box
-          # ----------------------------------------------------
           if [[ "$GOST_PROXY" =~ ^(hysteria2|hy2|vless|trojan|socks5|socks|http|https):// ]]; then
-            echo "🔵 检测到标准代理链接，准备启动 sing-box 多协议引擎"
+            echo "🔵 检测到标准代理链接，准备启动 sing-box"
 
             SB_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/SagerNet/sing-box/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
             SB_VERSION="${SB_TAG#v}"
@@ -78,7 +75,6 @@ jobs:
             SINGBOX_BIN="$(find sing-box-extract -type f -name sing-box -print -quit)"
             chmod +x "$SINGBOX_BIN"
 
-            # 动态多协议解析转换引擎
             cat << 'EOF' > make_singbox.py
           import json
           import os
@@ -100,7 +96,6 @@ jobs:
 
           outbound = None
 
-          # Hysteria 2 / Hy2
           if scheme in ("hysteria2", "hy2"):
               auth_secret = user or password
               outbound = {
@@ -123,7 +118,6 @@ jobs:
                       "password": obfs_password,
                   }
 
-          # VLESS
           elif scheme == "vless":
               uuid = user
               security = params.get("security", ["none"])[0].lower()
@@ -156,7 +150,6 @@ jobs:
                       transport["headers"] = {"Host": host}
                   outbound["transport"] = transport
 
-          # Trojan
           elif scheme == "trojan":
               outbound = {
                   "type": "trojan",
@@ -179,7 +172,6 @@ jobs:
                       transport["headers"] = {"Host": host}
                   outbound["transport"] = transport
 
-          # Socks5
           elif scheme in ("socks5", "socks"):
               outbound = {
                   "type": "socks",
@@ -192,7 +184,6 @@ jobs:
               if password:
                   outbound["password"] = password
 
-          # HTTP / HTTPS
           elif scheme in ("http", "https"):
               outbound = {
                   "type": "http",
@@ -270,11 +261,7 @@ jobs:
             exit 0
           fi
 
-          # ----------------------------------------------------
-          # 3.2 特殊转发协议 -> GOST 回退
-          # ----------------------------------------------------
           echo "🟢 检测到特殊代理，准备启动 GOST 转发"
-
           GOST_TAG="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/ginuerzh/gost/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
           GOST_VERSION="${GOST_TAG#v}"
           echo "📦 GOST 版本: ${GOST_VERSION}"
@@ -311,11 +298,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       # ======================================================
-      # 4. 执行自动化续期脚本
+      # 4. 执行自动化续期脚本 (注入账号密码与 PAT)
       # ======================================================
       - name: 🤖 执行自动化脚本
         env:
           MONKEY_ACCOUNT: ${{ secrets.MONKEY_ACCOUNT }}
+          MONKEY_EMAIL: ${{ secrets.MONKEY_EMAIL }}
+          MONKEY_PASSWORD: ${{ secrets.MONKEY_PASSWORD }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT_TOKEN }}#${{ secrets.TG_CHAT_ID }}
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
@@ -344,19 +333,15 @@ jobs:
           echo "✅ 进程与临时文件清理完成"
 
       # ======================================================
-      # 6. 清理旧工作流历史记录 (强制直连 GitHub API，只保留本次)
+      # 6. 清理旧工作流历史记录 (只保留本次运行)
       # ======================================================
       - name: 🗑️ 清理旧工作流历史记录
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_PAT }}
         run: |
-          # 彻底清除代理环境变量，确保直连 GitHub API
           unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
-
           echo "🧹 正在清理旧记录（仅保留当前这一次）..."
-          
-          # 获取除了当前运行 ID 之外的所有历史 Runs
           OLD_RUNS=$(gh api --paginate "/repos/${{ github.repository }}/actions/runs?per_page=100" \
             --jq ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id") || true
 
