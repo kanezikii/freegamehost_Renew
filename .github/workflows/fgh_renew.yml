@@ -1,4 +1,5 @@
 name: FGH-Renew-Auto
+
 on:
   workflow_dispatch:
   schedule:
@@ -9,55 +10,185 @@ jobs:
   run_fgh_renew:
     runs-on: ubuntu-latest
     steps:
-      # 1. 跨仓库拉取私有库代码 (核心变更点)
-      - name: 📥 拉取私库代码 (kanezikii/fgh_Renew)
-        run: |
-          # 使用 Secret 中的 Token 绕过权限拉取私有库
-          git clone https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git private_repo
-          # 将私有库中的 fgh_renew.py 复制到当前运行根目录
-          cp private_repo/fgh_renew.py fgh_renew.py
-
       - name: 🐍 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable xvfb x11-utils xdotool scrot unzip curl
+          sudo apt-get install -y xvfb x11-utils xdotool scrot unzip curl
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install seleniumbase requests
+          pip install seleniumbase requests pyyaml
           seleniumbase install chromedriver
 
-      - name: 🚀 部署并启动本地代理 (Xray)
-        env:
-          XRAY_CONFIG: ${{ secrets.XRAY_CONFIG }}
+      - name: 📥 拉取私库代码 (kanezikii/fgh_Renew)
         run: |
-          # 下载并启动 Xray 代理以提供纯净的家宽/机房 IP
-          wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip xray.zip xray -d ./xray-bin
-          chmod +x ./xray-bin/xray
-          echo "$XRAY_CONFIG" > ./xray-bin/config.json
-          nohup ./xray-bin/xray run -c ./xray-bin/config.json > xray.log 2>&1 &
-          sleep 3
+          git clone https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git private_repo
+
+      - name: 🚀 部署并启动全协议本地代理 (Mihomo)
+        env:
+          PROXY_CONFIG: ${{ secrets.XRAY_CONFIG }}
+        run: |
+          # 1. 下载支持 VLESS / VMess / Hy2 / SS 的 Mihomo 内核
+          curl -sL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-amd64-v1.19.2.gz | gzip -d > ./mihomo
+          chmod +x ./mihomo
+
+          # 2. 生成代理配置文件 (支持直接粘贴节点链接或完整配置)
+          python - << 'EOF'
+          import os, sys, json, base64, urllib.parse
+
+          raw = os.environ.get("PROXY_CONFIG", "").strip()
+          if not raw:
+              print("⚠️ 未配置代理 Secret (XRAY_CONFIG)，将跳过代理部署。")
+              sys.exit(0)
+
+          # 若输入已经是完整配置文件 (YAML 或 JSON)
+          if raw.startswith("{") or "proxies:" in raw:
+              with open("config.yaml", "w", encoding="utf-8") as f:
+                  f.write(raw)
+              print("✅ 识别为完整配置文件")
+              sys.exit(0)
+
+          # 解析节点分享链接 (VLESS, Hy2, VMess, SS)
+          proxy = None
+          if raw.startswith("hysteria2://") or raw.startswith("hy2://"):
+              u = urllib.parse.urlsplit(raw)
+              q = urllib.parse.parse_qs(u.query)
+              proxy = {
+                  "name": "auto_proxy",
+                  "type": "hysteria2",
+                  "server": u.hostname,
+                  "port": u.port or 443,
+                  "password": u.username or u.password or "",
+                  "sni": q.get("sni", [u.hostname])[0],
+                  "skip-cert-verify": q.get("insecure", ["0"])[0] in ["1", "true"]
+              }
+          elif raw.startswith("vless://"):
+              u = urllib.parse.urlsplit(raw)
+              q = urllib.parse.parse_qs(u.query)
+              proxy = {
+                  "name": "auto_proxy",
+                  "type": "vless",
+                  "server": u.hostname,
+                  "port": u.port or 443,
+                  "uuid": u.username,
+                  "cipher": "auto",
+                  "network": q.get("type", ["tcp"])[0],
+                  "tls": q.get("security", [""])[0] in ["tls", "reality"],
+                  "udp": True
+              }
+              if q.get("security", [""])[0] == "reality":
+                  proxy["reality-opts"] = {
+                      "public-key": q.get("pbk", [""])[0],
+                      "short-id": q.get("sid", [""])[0]
+                  }
+                  proxy["client-fingerprint"] = q.get("fp", ["chrome"])[0]
+              if "sni" in q:
+                  proxy["servername"] = q["sni"][0]
+              if proxy["network"] == "ws":
+                  proxy["ws-opts"] = {"path": q.get("path", ["/"])[0]}
+                  if "host" in q: proxy["ws-opts"]["headers"] = {"Host": q["host"][0]}
+              elif proxy["network"] == "grpc":
+                  proxy["grpc-opts"] = {"grpc-service-name": q.get("serviceName", [""])[0]}
+          elif raw.startswith("vmess://"):
+              b64_str = raw[8:] + "=" * ((4 - len(raw[8:]) % 4) % 4)
+              d = json.loads(base64.b64decode(b64_str).decode("utf-8"))
+              proxy = {
+                  "name": "auto_proxy",
+                  "type": "vmess",
+                  "server": d.get("add"),
+                  "port": int(d.get("port")),
+                  "uuid": d.get("id"),
+                  "alterId": int(d.get("aid", 0)),
+                  "cipher": "auto",
+                  "network": d.get("net", "tcp"),
+                  "tls": d.get("tls") in ["tls", "1", True],
+                  "udp": True
+              }
+              if d.get("net") == "ws":
+                  proxy["ws-opts"] = {"path": d.get("path", "/")}
+                  if d.get("host"): proxy["ws-opts"]["headers"] = {"Host": d["host"]}
+              elif d.get("net") == "grpc":
+                  proxy["grpc-opts"] = {"grpc-service-name": d.get("path", "")}
+          elif raw.startswith("ss://"):
+              u = urllib.parse.urlsplit(raw)
+              if "@" in raw[5:]:
+                  userinfo = u.username + "=" * ((4 - len(u.username) % 4) % 4)
+                  method, password = base64.b64decode(userinfo).decode("utf-8").split(":", 1)
+                  server, port = u.hostname, u.port
+              else:
+                  raw_b64 = u.netloc + "=" * ((4 - len(u.netloc) % 4) % 4)
+                  decoded = base64.b64decode(raw_b64).decode("utf-8")
+                  userinfo, hostport = decoded.split("@", 1)
+                  method, password = userinfo.split(":", 1)
+                  server, port = hostport.split(":", 1)
+              proxy = {
+                  "name": "auto_proxy",
+                  "type": "ss",
+                  "server": server,
+                  "port": int(port),
+                  "cipher": method,
+                  "password": password,
+                  "udp": True
+              }
+
+          if proxy:
+              cfg = {
+                  "mixed-port": 10808,
+                  "allow-lan": False,
+                  "mode": "rule",
+                  "log-level": "info",
+                  "proxies": [proxy],
+                  "rules": ["MATCH,auto_proxy"]
+              }
+              with open("config.json", "w", encoding="utf-8") as f:
+                  json.dump(cfg, f, indent=2)
+              print(f"✅ 已成功转换 {proxy['type']} 节点为代理配置！")
+          else:
+              print("❌ 未识别的节点协议格式")
+              sys.exit(1)
+          EOF
+
+          # 3. 后台启动本地代理
+          if [ -f "./config.json" ] || [ -f "./config.yaml" ]; then
+            CONFIG_FILE=$(ls ./config.json ./config.yaml 2>/dev/null | head -n 1)
+            nohup ./mihomo -d . -f "$CONFIG_FILE" > mihomo.log 2>&1 &
+            sleep 3
+            echo "🌐 代理已在 127.0.0.1:10808 端口启动"
+          fi
 
       - name: 🚀 执行核心自动化脚本
         env:
           PYTHONIOENCODING: utf-8
           FGH_ACCOUNT: ${{ secrets.FGH_ACCOUNT }}
-          FGH_COOKIES: ${{ secrets.FGH_COOKIES }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: |
-          # 使用虚拟显示器运行刚刚从私库拉取过来的脚本
+          cd private_repo
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python fgh_renew.py
+
+      - name: 💾 同步最新 Cookie 回写至私有仓库
+        if: always()
+        run: |
+          cd private_repo
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet fgh_renew.py; then
+            echo "🔄 检测到 Cookie 发生更新，正在推送到远程私有仓库..."
+            git add fgh_renew.py
+            git commit -m "Auto: Update cookies [skip ci]"
+            git push https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git HEAD:main
+          else
+            echo "⚪ Cookie 无变动，无需推送。"
+          fi
 
       - name: 📸 上传运行截图 (便于排错)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: "*.png"
+          path: "**/*.png"
           retention-days: 3
