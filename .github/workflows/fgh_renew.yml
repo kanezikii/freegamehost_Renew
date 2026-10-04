@@ -31,13 +31,11 @@ jobs:
         env:
           RAW_CONFIG: ${{ secrets.XRAY_CONFIG }}
         run: |
-          # 1. 自动转换并补齐节点完整参数 (支持 VLESS / VMess / Hy2 / SS / 原生配置)
           python3 - << 'EOF'
           import os, sys, json, base64, urllib.parse
 
           raw = os.environ.get("RAW_CONFIG", "").strip()
           if not raw:
-              print("⚠️ 未配置代理 Secret，将使用直连。")
               sys.exit(0)
 
           if '"outbounds"' in raw or "proxies:" in raw:
@@ -147,6 +145,7 @@ jobs:
                   "allow-lan": False,
                   "mode": "rule",
                   "log-level": "info",
+                  "ipv6": False,
                   "proxies": [proxy],
                   "proxy-groups": [
                       {"name": "GLOBAL_PROXY", "type": "select", "proxies": ["AUTO_PROXY"]}
@@ -155,10 +154,9 @@ jobs:
               }
               with open("config.json", "w", encoding="utf-8") as f:
                   json.dump(cfg, f, indent=2)
-              print("✅ 节点参数与 ws-opts 伪装规则构建完毕！")
+              print("✅ 代理参数已构建，已显式关闭 IPv6！")
           EOF
 
-          # 2. 启动并测试代理真实出网
           curl -sL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-amd64-v1.19.2.gz | gzip -d > ./mihomo
           chmod +x ./mihomo
           CONFIG_FILE=$(ls config.json config.yaml 2>/dev/null | head -n 1)
@@ -166,11 +164,11 @@ jobs:
           if [ -n "$CONFIG_FILE" ]; then
               nohup ./mihomo -d . -f "$CONFIG_FILE" > proxy.log 2>&1 &
               sleep 4
-              TEST_IP=$(curl -s -x http://127.0.0.1:10808 -m 8 https://api.ip.sb/ip || true)
+              TEST_IP=$(curl -s --socks5 127.0.0.1:10808 -m 8 https://api.ip.sb/ip || true)
               if [ -n "$TEST_IP" ]; then
                   echo "🌐 本地代理正常出网，节点出口 IP: $TEST_IP"
               else
-                  echo "⚠️ 节点无法出网，查看核心报错："
+                  echo "⚠️ 代理测试未通过，查看日志："
                   cat proxy.log
               fi
           fi
