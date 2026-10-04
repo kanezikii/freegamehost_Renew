@@ -27,64 +27,121 @@ jobs:
           npm init -y
           npm install puppeteer-real-browser
 
-      - name: 🚀 部署并启动全协议本地代理
+      - name: 🚀 部署并启动全协议本地代理 (Mihomo)
         env:
           RAW_CONFIG: ${{ secrets.XRAY_CONFIG }}
         run: |
-          # 1. 探测配置类型并启动对应内核
+          # 1. 自动转换并补齐节点完整参数 (支持 VLESS / VMess / Hy2 / SS / 原生配置)
           python3 - << 'EOF'
           import os, sys, json, base64, urllib.parse
 
           raw = os.environ.get("RAW_CONFIG", "").strip()
           if not raw:
-              print("⚠️ 未配置代理 Secret，将直接使用直连模式。")
+              print("⚠️ 未配置代理 Secret，将使用直连。")
               sys.exit(0)
 
-          # 情况 A: 原生 Xray JSON 配置 (包含 outbounds)
-          if '"outbounds"' in raw:
-              print("📦 识别为原生 Xray 配置文件")
-              with open("xray_config.json", "w", encoding="utf-8") as f:
+          if '"outbounds"' in raw or "proxies:" in raw:
+              with open("config.yaml", "w", encoding="utf-8") as f:
                   f.write(raw)
-              with open("engine.type", "w") as f: f.write("xray")
               sys.exit(0)
 
-          # 情况 B: 完整 Clash YAML
-          if "proxies:" in raw:
-              print("📦 识别为完整 Clash 配置文件")
-              with open("clash_config.yaml", "w", encoding="utf-8") as f:
-                  f.write(raw)
-              with open("engine.type", "w") as f: f.write("mihomo")
-              sys.exit(0)
-
-          # 情况 C: 单节点分享链接 (VLESS / VMess / Hy2 / SS)
           proxy = None
-          if raw.startswith("hysteria2://") or raw.startswith("hy2://"):
+          if raw.startswith("vless://"):
               u = urllib.parse.urlsplit(raw)
               q = urllib.parse.parse_qs(u.query)
-              proxy = {"name": "PROXY_NODE", "type": "hysteria2", "server": u.hostname, "port": u.port or 443, "password": u.username or u.password or "", "sni": q.get("sni", [u.hostname])[0], "skip-cert-verify": q.get("insecure", ["0"])[0] in ["1", "true"]}
-          elif raw.startswith("vless://"):
-              u = urllib.parse.urlsplit(raw)
-              q = urllib.parse.parse_qs(u.query)
-              proxy = {"name": "PROXY_NODE", "type": "vless", "server": u.hostname, "port": u.port or 443, "uuid": u.username, "cipher": "auto", "network": q.get("type", ["tcp"])[0], "tls": q.get("security", [""])[0] in ["tls", "reality"], "udp": True}
-              if q.get("security", [""])[0] == "reality":
-                  proxy["reality-opts"] = {"public-key": q.get("pbk", [""])[0], "short-id": q.get("sid", [""])[0]}
+              net_type = q.get("type", ["tcp"])[0].lower()
+              sec = q.get("security", ["none"])[0].lower()
+              sni = q.get("sni", [""])[0] or u.hostname
+              host = q.get("host", [""])[0] or sni
+              path = urllib.parse.unquote(q.get("path", ["/"])[0])
+              
+              proxy = {
+                  "name": "AUTO_PROXY",
+                  "type": "vless",
+                  "server": u.hostname,
+                  "port": int(u.port or 443),
+                  "uuid": u.username,
+                  "cipher": "auto",
+                  "udp": True,
+                  "tls": sec in ["tls", "reality"],
+                  "skip-cert-verify": True,
+                  "servername": sni,
+                  "network": net_type
+              }
+              if sec == "reality":
+                  proxy["reality-opts"] = {
+                      "public-key": q.get("pbk", [""])[0],
+                      "short-id": q.get("sid", [""])[0]
+                  }
                   proxy["client-fingerprint"] = q.get("fp", ["chrome"])[0]
-              if "sni" in q: proxy["servername"] = q["sni"][0]
+              if net_type == "ws":
+                  proxy["ws-opts"] = {"path": path, "headers": {"Host": host}}
+              elif net_type == "grpc":
+                  proxy["grpc-opts"] = {"grpc-service-name": q.get("serviceName", [""])[0]}
+
           elif raw.startswith("vmess://"):
               b64_str = raw[8:] + "=" * ((4 - len(raw[8:]) % 4) % 4)
               d = json.loads(base64.b64decode(b64_str).decode("utf-8"))
-              proxy = {"name": "PROXY_NODE", "type": "vmess", "server": d.get("add"), "port": int(d.get("port")), "uuid": d.get("id"), "alterId": int(d.get("aid", 0)), "cipher": "auto", "network": d.get("net", "tcp"), "tls": d.get("tls") in ["tls", "1", True], "udp": True}
+              net_type = d.get("net", "tcp").lower()
+              host = d.get("host", "") or d.get("add", "")
+              path = d.get("path", "/")
+              tls = d.get("tls") in ["tls", "1", True]
+              proxy = {
+                  "name": "AUTO_PROXY",
+                  "type": "vmess",
+                  "server": d.get("add"),
+                  "port": int(d.get("port")),
+                  "uuid": d.get("id"),
+                  "alterId": int(d.get("aid", 0)),
+                  "cipher": "auto",
+                  "udp": True,
+                  "tls": tls,
+                  "skip-cert-verify": True,
+                  "servername": d.get("sni", "") or host,
+                  "network": net_type
+              }
+              if net_type == "ws":
+                  proxy["ws-opts"] = {"path": path, "headers": {"Host": host}}
+              elif net_type == "grpc":
+                  proxy["grpc-opts"] = {"grpc-service-name": path}
+
+          elif raw.startswith("hysteria2://") or raw.startswith("hy2://"):
+              u = urllib.parse.urlsplit(raw)
+              q = urllib.parse.parse_qs(u.query)
+              proxy = {
+                  "name": "AUTO_PROXY",
+                  "type": "hysteria2",
+                  "server": u.hostname,
+                  "port": int(u.port or 443),
+                  "password": u.username or u.password or "",
+                  "sni": q.get("sni", [u.hostname])[0],
+                  "skip-cert-verify": True,
+                  "udp": True
+              }
+
           elif raw.startswith("ss://"):
               u = urllib.parse.urlsplit(raw)
-              raw_b64 = u.netloc + "=" * ((4 - len(u.netloc) % 4) % 4)
-              decoded = base64.b64decode(raw_b64).decode("utf-8")
-              userinfo, hostport = decoded.split("@", 1)
-              method, password = userinfo.split(":", 1)
-              server, port = hostport.split(":", 1)
-              proxy = {"name": "PROXY_NODE", "type": "ss", "server": server, "port": int(port), "cipher": method, "password": password, "udp": True}
+              if "@" in raw[5:]:
+                  userinfo = u.username + "=" * ((4 - len(u.username) % 4) % 4)
+                  method, password = base64.b64decode(userinfo).decode("utf-8").split(":", 1)
+                  server, port = u.hostname, u.port
+              else:
+                  raw_b64 = u.netloc + "=" * ((4 - len(u.netloc) % 4) % 4)
+                  decoded = base64.b64decode(raw_b64).decode("utf-8")
+                  userinfo, hostport = decoded.split("@", 1)
+                  method, password = userinfo.split(":", 1)
+                  server, port = hostport.split(":", 1)
+              proxy = {
+                  "name": "AUTO_PROXY",
+                  "type": "ss",
+                  "server": server,
+                  "port": int(port),
+                  "cipher": method,
+                  "password": password,
+                  "udp": True
+              }
 
           if proxy:
-              # 正确补齐 proxy-groups 策略组定义，彻底避免规则解析报错
               cfg = {
                   "mixed-port": 10808,
                   "allow-lan": False,
@@ -92,37 +149,30 @@ jobs:
                   "log-level": "info",
                   "proxies": [proxy],
                   "proxy-groups": [
-                      {"name": "GLOBAL_PROXY", "type": "select", "proxies": ["PROXY_NODE"]}
+                      {"name": "GLOBAL_PROXY", "type": "select", "proxies": ["AUTO_PROXY"]}
                   ],
                   "rules": ["MATCH,GLOBAL_PROXY"]
               }
-              with open("clash_config.json", "w", encoding="utf-8") as f:
+              with open("config.json", "w", encoding="utf-8") as f:
                   json.dump(cfg, f, indent=2)
-              with open("engine.type", "w") as f: f.write("mihomo")
-              print("✅ 节点链接成功转换并补齐策略组！")
+              print("✅ 节点参数与 ws-opts 伪装规则构建完毕！")
           EOF
 
-          # 2. 启动对应内核并验证连通性
-          ENGINE=$(cat engine.type 2>/dev/null || echo "none")
-          if [ "$ENGINE" = "xray" ]; then
-              wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-              unzip -o xray.zip xray -d ./xray-bin
-              chmod +x ./xray-bin/xray
-              nohup ./xray-bin/xray run -c xray_config.json > proxy.log 2>&1 &
-          elif [ "$ENGINE" = "mihomo" ]; then
-              curl -sL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-amd64-v1.19.2.gz | gzip -d > ./mihomo
-              chmod +x ./mihomo
-              CONFIG_FILE=$(ls clash_config.json clash_config.yaml 2>/dev/null | head -n 1)
-              nohup ./mihomo -d . -f "$CONFIG_FILE" > proxy.log 2>&1 &
-          fi
+          # 2. 启动并测试代理真实出网
+          curl -sL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-amd64-v1.19.2.gz | gzip -d > ./mihomo
+          chmod +x ./mihomo
+          CONFIG_FILE=$(ls config.json config.yaml 2>/dev/null | head -n 1)
 
-          sleep 3
-          # 3. 严格验证代理端口
-          if curl -s -x http://127.0.0.1:10808 -m 8 https://api.ip.sb/ip > /dev/null 2>&1 || curl -s --socks5 127.0.0.1:10808 -m 8 https://api.ip.sb/ip > /dev/null 2>&1; then
-              echo "✅ 本地代理健康校验通过，端口 127.0.0.1:10808 就绪！"
-          else
-              echo "⚠️ 本地代理启动或连通性未通过，打印日志排错："
-              cat proxy.log 2>/dev/null || true
+          if [ -n "$CONFIG_FILE" ]; then
+              nohup ./mihomo -d . -f "$CONFIG_FILE" > proxy.log 2>&1 &
+              sleep 4
+              TEST_IP=$(curl -s -x http://127.0.0.1:10808 -m 8 https://api.ip.sb/ip || true)
+              if [ -n "$TEST_IP" ]; then
+                  echo "🌐 本地代理正常出网，节点出口 IP: $TEST_IP"
+              else
+                  echo "⚠️ 节点无法出网，查看核心报错："
+                  cat proxy.log
+              fi
           fi
 
       - name: 🚀 执行核心自动化脚本
@@ -141,7 +191,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           if ! git diff --quiet fgh_renew.js; then
-            echo "🔄 检测到 Cookie 变动，自动同步到私库..."
+            echo "🔄 检测到 Cookie 发生变动，自动同步到私库..."
             git add fgh_renew.js
             git commit -m "Auto: Update cookies [skip ci]"
             git push https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git HEAD:main
