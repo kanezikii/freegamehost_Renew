@@ -10,165 +10,89 @@ jobs:
   run_fgh_renew:
     runs-on: ubuntu-latest
     steps:
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v5
+      - name: 🟢 设置 Node.js 环境
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
+          node-version: 20
 
-      - name: 🛠️ 安装系统依赖
+      - name: 🛠️ 安装系统依赖与 Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool scrot unzip curl
-
-      - name: 🐍 安装 Python 依赖
-        run: |
-          pip install seleniumbase requests pyyaml pyautogui
-          seleniumbase install chromedriver
+          sudo apt-get install -y google-chrome-stable xvfb curl unzip
 
       - name: 📥 拉取私库代码 (kanezikii/fgh_Renew)
         run: |
           git clone https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git private_repo
+          cd private_repo
+          npm init -y
+          npm install puppeteer-real-browser
 
       - name: 🚀 部署并启动全协议本地代理 (Mihomo)
         env:
           PROXY_CONFIG: ${{ secrets.XRAY_CONFIG }}
         run: |
-          # 1. 下载支持 VLESS / VMess / Hy2 / SS 的 Mihomo 内核
           curl -sL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-amd64-v1.19.2.gz | gzip -d > ./mihomo
           chmod +x ./mihomo
 
-          # 2. 生成代理配置文件 (支持直接粘贴节点链接或完整配置)
-          python - << 'EOF'
+          # 转换节点链接为通用配置 (vless/vmess/hy2/ss)
+          python3 - << 'EOF'
           import os, sys, json, base64, urllib.parse
-
           raw = os.environ.get("PROXY_CONFIG", "").strip()
           if not raw:
-              print("⚠️ 未配置代理 Secret (XRAY_CONFIG)，将跳过代理部署。")
               sys.exit(0)
-
-          # 若输入已经是完整配置文件 (YAML 或 JSON)
           if raw.startswith("{") or "proxies:" in raw:
               with open("config.yaml", "w", encoding="utf-8") as f:
                   f.write(raw)
-              print("✅ 识别为完整配置文件")
               sys.exit(0)
 
-          # 解析节点分享链接 (VLESS, Hy2, VMess, SS)
           proxy = None
           if raw.startswith("hysteria2://") or raw.startswith("hy2://"):
               u = urllib.parse.urlsplit(raw)
               q = urllib.parse.parse_qs(u.query)
-              proxy = {
-                  "name": "auto_proxy",
-                  "type": "hysteria2",
-                  "server": u.hostname,
-                  "port": u.port or 443,
-                  "password": u.username or u.password or "",
-                  "sni": q.get("sni", [u.hostname])[0],
-                  "skip-cert-verify": q.get("insecure", ["0"])[0] in ["1", "true"]
-              }
+              proxy = {"name": "auto", "type": "hysteria2", "server": u.hostname, "port": u.port or 443, "password": u.username or u.password or "", "sni": q.get("sni", [u.hostname])[0], "skip-cert-verify": q.get("insecure", ["0"])[0] in ["1", "true"]}
           elif raw.startswith("vless://"):
               u = urllib.parse.urlsplit(raw)
               q = urllib.parse.parse_qs(u.query)
-              proxy = {
-                  "name": "auto_proxy",
-                  "type": "vless",
-                  "server": u.hostname,
-                  "port": u.port or 443,
-                  "uuid": u.username,
-                  "cipher": "auto",
-                  "network": q.get("type", ["tcp"])[0],
-                  "tls": q.get("security", [""])[0] in ["tls", "reality"],
-                  "udp": True
-              }
+              proxy = {"name": "auto", "type": "vless", "server": u.hostname, "port": u.port or 443, "uuid": u.username, "cipher": "auto", "network": q.get("type", ["tcp"])[0], "tls": q.get("security", [""])[0] in ["tls", "reality"], "udp": True}
               if q.get("security", [""])[0] == "reality":
-                  proxy["reality-opts"] = {
-                      "public-key": q.get("pbk", [""])[0],
-                      "short-id": q.get("sid", [""])[0]
-                  }
+                  proxy["reality-opts"] = {"public-key": q.get("pbk", [""])[0], "short-id": q.get("sid", [""])[0]}
                   proxy["client-fingerprint"] = q.get("fp", ["chrome"])[0]
-              if "sni" in q:
-                  proxy["servername"] = q["sni"][0]
-              if proxy["network"] == "ws":
-                  proxy["ws-opts"] = {"path": q.get("path", ["/"])[0]}
-                  if "host" in q: proxy["ws-opts"]["headers"] = {"Host": q["host"][0]}
-              elif proxy["network"] == "grpc":
-                  proxy["grpc-opts"] = {"grpc-service-name": q.get("serviceName", [""])[0]}
+              if "sni" in q: proxy["servername"] = q["sni"][0]
           elif raw.startswith("vmess://"):
               b64_str = raw[8:] + "=" * ((4 - len(raw[8:]) % 4) % 4)
               d = json.loads(base64.b64decode(b64_str).decode("utf-8"))
-              proxy = {
-                  "name": "auto_proxy",
-                  "type": "vmess",
-                  "server": d.get("add"),
-                  "port": int(d.get("port")),
-                  "uuid": d.get("id"),
-                  "alterId": int(d.get("aid", 0)),
-                  "cipher": "auto",
-                  "network": d.get("net", "tcp"),
-                  "tls": d.get("tls") in ["tls", "1", True],
-                  "udp": True
-              }
-              if d.get("net") == "ws":
-                  proxy["ws-opts"] = {"path": d.get("path", "/")}
-                  if d.get("host"): proxy["ws-opts"]["headers"] = {"Host": d["host"]}
-              elif d.get("net") == "grpc":
-                  proxy["grpc-opts"] = {"grpc-service-name": d.get("path", "")}
+              proxy = {"name": "auto", "type": "vmess", "server": d.get("add"), "port": int(d.get("port")), "uuid": d.get("id"), "alterId": int(d.get("aid", 0)), "cipher": "auto", "network": d.get("net", "tcp"), "tls": d.get("tls") in ["tls", "1", True], "udp": True}
           elif raw.startswith("ss://"):
               u = urllib.parse.urlsplit(raw)
-              if "@" in raw[5:]:
-                  userinfo = u.username + "=" * ((4 - len(u.username) % 4) % 4)
-                  method, password = base64.b64decode(userinfo).decode("utf-8").split(":", 1)
-                  server, port = u.hostname, u.port
-              else:
-                  raw_b64 = u.netloc + "=" * ((4 - len(u.netloc) % 4) % 4)
-                  decoded = base64.b64decode(raw_b64).decode("utf-8")
-                  userinfo, hostport = decoded.split("@", 1)
-                  method, password = userinfo.split(":", 1)
-                  server, port = hostport.split(":", 1)
-              proxy = {
-                  "name": "auto_proxy",
-                  "type": "ss",
-                  "server": server,
-                  "port": int(port),
-                  "cipher": method,
-                  "password": password,
-                  "udp": True
-              }
+              raw_b64 = u.netloc + "=" * ((4 - len(u.netloc) % 4) % 4)
+              decoded = base64.b64decode(raw_b64).decode("utf-8")
+              userinfo, hostport = decoded.split("@", 1)
+              method, password = userinfo.split(":", 1)
+              server, port = hostport.split(":", 1)
+              proxy = {"name": "auto", "type": "ss", "server": server, "port": int(port), "cipher": method, "password": password, "udp": True}
 
           if proxy:
-              cfg = {
-                  "mixed-port": 10808,
-                  "allow-lan": False,
-                  "mode": "rule",
-                  "log-level": "info",
-                  "proxies": [proxy],
-                  "rules": ["MATCH,auto_proxy"]
-              }
+              cfg = {"mixed-port": 10808, "allow-lan": False, "mode": "rule", "proxies": [proxy], "rules": ["MATCH,auto"]}
               with open("config.json", "w", encoding="utf-8") as f:
                   json.dump(cfg, f, indent=2)
-              print(f"✅ 已成功转换 {proxy['type']} 节点为代理配置！")
-          else:
-              print("❌ 未识别的节点协议格式")
-              sys.exit(1)
           EOF
 
-          # 3. 后台启动本地代理
           if [ -f "./config.json" ] || [ -f "./config.yaml" ]; then
             CONFIG_FILE=$(ls ./config.json ./config.yaml 2>/dev/null | head -n 1)
             nohup ./mihomo -d . -f "$CONFIG_FILE" > mihomo.log 2>&1 &
             sleep 3
-            echo "🌐 代理已在 127.0.0.1:10808 端口启动"
+            echo "🌐 本地代理端口已就绪: 127.0.0.1:10808"
           fi
 
       - name: 🚀 执行核心自动化脚本
         env:
-          PYTHONIOENCODING: utf-8
           FGH_ACCOUNT: ${{ secrets.FGH_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
+          SERVER_ID: '5f39d742'
+          PROXY_SERVER: 'socks5://127.0.0.1:10808'
         run: |
           cd private_repo
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python fgh_renew.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1600x24" node fgh_renew.js
 
       - name: 💾 同步最新 Cookie 回写至私有仓库
         if: always()
@@ -176,19 +100,19 @@ jobs:
           cd private_repo
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet fgh_renew.py; then
-            echo "🔄 检测到 Cookie 发生更新，正在推送到远程私有仓库..."
-            git add fgh_renew.py
+          if ! git diff --quiet fgh_renew.js; then
+            echo "🔄 检测到 Cookie 发生变动，推送回私有仓库..."
+            git add fgh_renew.js
             git commit -m "Auto: Update cookies [skip ci]"
             git push https://x-access-token:${{ secrets.PRIVATE_PAT }}@github.com/kanezikii/fgh_Renew.git HEAD:main
           else
             echo "⚪ Cookie 无变动，无需推送。"
           fi
 
-      - name: 📸 上传运行截图 (便于排错)
+      - name: 📸 上传现场截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
-          path: "**/*.png"
+          path: "private_repo/artifacts/*.png"
           retention-days: 3
