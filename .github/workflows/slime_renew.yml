@@ -31,28 +31,27 @@ jobs:
           pip install playwright pynacl
           playwright install chromium
 
-      - name: 🌐 启动 Hysteria2 代理节点 (US-Oracle)
+      - name: 🌐 启动通用代理节点 (sing-box)
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          SING_BOX_CONFIG: ${{ secrets.SING_BOX_CONFIG }}
         run: |
-          # 下载最新版 Hysteria2 Linux 内核
-          wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
-          chmod +x hysteria
-          
-          # 生成 Hysteria2 客户端配置文件
-          cat << 'EOF' > hy2.yaml
-          server: 129.213.91.185:35013
-          auth: 4291c983-c520-46ac-82cc-48f14bef573f
-          tls:
-            sni: www.bing.com
-            insecure: true
-          socks5:
-            listen: 127.0.0.1:10808
-          EOF
-          
-          # 在后台挂起运行代理客户端
-          ./hysteria client -c hy2.yaml &
-          
-          # 等待 5 秒确保代理启动并连接成功
+          # 1. 动态生成 sing-box 配置
+          python proxy_setup.py
+
+          # 2. 下载并安装 sing-box 静态二进制包
+          SING_BOX_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VER}/sing-box-${SING_BOX_VER}-linux-amd64.tar.gz" -O sing-box.tar.gz
+          tar -xzf sing-box.tar.gz
+          mv sing-box-*/sing-box ./sing-box
+          chmod +x ./sing-box
+
+          # 3. 后台启动代理
+          ./sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
           sleep 5
+
+          # 4. 测试本地 SOCKS5 连通性
+          curl -s -x socks5://127.0.0.1:10808 https://ipinfo.io/json || (cat sing-box.log && exit 1)
 
       - name: 🚀 执行自动续期 + 更新 Cookie
         env:
@@ -60,11 +59,9 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
-          # 强制去掉可能存在的换行符和空格
           GH_OWNER: ${{ secrets.GH_OWNER }}
           GH_REPO: ${{ secrets.GH_REPO }}
         run: |
-          # 清理环境变量里的换行符（非常关键）
           export GH_OWNER=$(echo "$GH_OWNER" | tr -d '\n\r ')
           export GH_REPO=$(echo "$GH_REPO" | tr -d '\n\r ')
           echo "使用仓库: $GH_OWNER/$GH_REPO"
@@ -81,44 +78,25 @@ jobs:
       - name: 🧽 清理进程和临时文件
         if: always()
         run: |
-          pkill -f hysteria || true
           pkill -f sing-box || true
-          pkill -f chromedriver || true
+          pkill -f hysteria || true
           pkill -f chrome || true
-          pkill -f Xvfb || true
-          rm -f hysteria hy2.yaml sing-box sing-box-config.json sing-box.log
+          rm -rf sing-box* hy2.yaml hysteria
 
-      # ==================== 修复后的清理步骤 ====================
       - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}   # 使用你权限最高的 PAT
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          # 清理可能存在的换行符
           OWNER=$(echo "${{ secrets.GH_OWNER }}" | tr -d '\n\r ')
           REPO=$(echo "${{ secrets.GH_REPO }}" | tr -d '\n\r ')
-          
-          echo "正在清理仓库: $OWNER/$REPO"
-          
-          runs=$(gh run list \
-            --repo "$OWNER/$REPO" \
-            --workflow="Slime Auto Renew" \
-            --limit=100 \
-            --json databaseId \
-            --jq '.[].databaseId' 2>/dev/null || true)
-          
-          if [ -z "$runs" ]; then
-            echo "未找到可清理的运行记录"
-            exit 0
+          runs=$(gh run list --repo "$OWNER/$REPO" --workflow="Slime Auto Renew" --limit=100 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+          if [ -n "$runs" ]; then
+            count=0
+            for run_id in $runs; do
+              count=$((count + 1))
+              if [ $count -gt 1 ]; then
+                gh run delete "$run_id" --repo "$OWNER/$REPO" || true
+              fi
+            done
           fi
-          
-          count=0
-          for run_id in $runs; do
-            count=$((count + 1))
-            if [ $count -gt 1 ]; then
-              echo "删除旧运行记录: $run_id"
-              gh run delete "$run_id" --repo "$OWNER/$REPO" || true
-            fi
-          done
-          
-          echo "清理完成，仅保留最新 1 条记录"
