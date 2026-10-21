@@ -39,10 +39,6 @@ jobs:
             echo "❌ 错误: 未配置 PROXY_URL Secret"
             exit 1
           fi
-
-          echo "⬇️ 正在准备万能协议解析器 (Subconverter)..."
-          wget -q https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz
-          tar -zxf subconverter_linux64.tar.gz
           
           echo "⬇️ 正在准备终极代理引擎 (Mihomo/Clash.Meta)..."
           wget -q https://github.com/MetaCubeX/mihomo/releases/download/v1.18.3/mihomo-linux-amd64-v1.18.3.gz
@@ -50,48 +46,46 @@ jobs:
           mv mihomo-linux-amd64-v1.18.3 mihomo
           chmod +x mihomo
 
-          # 启动本地服务提供单节点文本（防止单节点乱码被转义拦截）
-          echo "$PROXY_URL" > proxy_node.txt
-          python3 -m http.server 8000 >/dev/null 2>&1 &
-          HTTP_PID=$!
-          
-          # 启动转换器服务
-          cd subconverter
-          ./subconverter >/dev/null 2>&1 &
-          SUB_PID=$!
-          cd ..
-          sleep 2
-
           # 判断传入的是 订阅链接 还是 单节点链接
           if [[ "$PROXY_URL" == http* ]]; then
-            echo "🔗 检测到订阅链接，开始全量解析..."
+            echo "🔗 检测到订阅链接，开始使用 Subconverter 解析..."
+            wget -q https://github.com/tindy2013/subconverter/releases/latest/download/subconverter_linux64.tar.gz
+            tar -zxf subconverter_linux64.tar.gz
+            cd subconverter
+            ./subconverter >/dev/null 2>&1 &
+            SUB_PID=$!
+            cd ..
+            sleep 2
+            
             encoded_url=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['PROXY_URL'], safe=''))")
+            curl -s "http://127.0.0.1:25500/sub?target=clash&url=${encoded_url}&insert=false" > raw_config.yaml
+            kill $SUB_PID || true
+            
+            if ! grep -q "proxies:" raw_config.yaml; then
+              echo "❌ 订阅解析失败！可能是订阅链接不可达。"
+              cat raw_config.yaml
+              exit 1
+            fi
+            
+            # 使用 Python 提取解析后的 proxies
+            python3 -c '
+            import yaml, sys
+            with open("raw_config.yaml", "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            proxies = data.get("proxies", [])
+            with open("proxies.json", "w") as f:
+                import json
+                json.dump(proxies, f)
+            '
           else
-            echo "🔗 检测到单节点链接，开始解析..."
-            encoded_url=$(python3 -c "import urllib.parse; print(urllib.parse.quote('http://127.0.0.1:8000/proxy_node.txt', safe=''))")
-          fi
-          
-          # 让 Subconverter 生成基础节点配置
-          curl -s "http://127.0.0.1:25500/sub?target=clash&url=${encoded_url}&insert=false" > raw_config.yaml
-
-          # 杀死转换辅助进程
-          kill $HTTP_PID $SUB_PID || true
-
-          # 检查解析是否成功
-          if ! grep -q "proxies:" raw_config.yaml; then
-            echo "❌ 节点解析失败！可能是节点格式错误或订阅链接不可达。"
-            cat raw_config.yaml
-            exit 1
+            echo "🔗 检测到单节点链接，直接通过 Mihomo proxy-providers 解析..."
+            # 单节点不通过 Subconverter，直接写入 provider 文件
+            echo "$PROXY_URL" > node_list.txt
           fi
 
-          # 重新组装为纯净版 Mihomo 配置 (包含自动测速切换)
+          # 生成最终的 Mihomo 配置文件
           python3 -c '
-          import yaml, sys
-          with open("raw_config.yaml", "r", encoding="utf-8") as f:
-              data = yaml.safe_load(f)
-              
-          proxies = data.get("proxies", [])
-          proxy_names = [p["name"] for p in proxies]
+          import yaml, os, json
           
           config = {
               "port": 7890,
@@ -99,12 +93,14 @@ jobs:
               "allow-lan": True,
               "mode": "rule",
               "log-level": "info",
-              "proxies": proxies,
+              "proxies": [],
+              "proxy-providers": {},
               "proxy-groups": [
                   {
                       "name": "AUTO-SELECT",
                       "type": "url-test",
-                      "proxies": proxy_names,
+                      "proxies": [],
+                      "use": [],
                       "url": "http://www.gstatic.com/generate_204",
                       "interval": 300,
                       "tolerance": 50
@@ -112,14 +108,45 @@ jobs:
               ],
               "rules": ["MATCH,AUTO-SELECT"]
           }
+          
+          proxy_url = os.environ.get("PROXY_URL", "")
+          
+          if proxy_url.startswith("http"):
+              # 如果是订阅链接，读取前面解析好的 proxies.json
+              try:
+                  with open("proxies.json", "r") as f:
+                      proxies = json.load(f)
+                      config["proxies"] = proxies
+                      config["proxy-groups"][0]["proxies"] = [p["name"] for p in proxies]
+                      print(f"✅ 成功加载 {len(proxies)} 个订阅节点！")
+              except Exception as e:
+                  print(f"❌ 读取订阅节点失败: {e}")
+                  sys.exit(1)
+          else:
+              # 如果是单节点，使用 provider 直接读取外部 txt
+              config["proxy-providers"]["single_node"] = {
+                  "type": "file",
+                  "path": "./node_list.txt",
+                  "health-check": {"enable": True, "url": "http://www.gstatic.com/generate_204", "interval": 300}
+              }
+              config["proxy-groups"][0]["use"] = ["single_node"]
+              print("✅ 成功配置单节点解析！")
+
           with open("config.yaml", "w", encoding="utf-8") as f:
               yaml.dump(config, f, allow_unicode=True, sort_keys=False)
-          print(f"✅ 成功解析并装载 {len(proxies)} 个代理节点！")
           '
 
           # 启动 Mihomo 代理引擎
           ./mihomo -f config.yaml > mihomo.log 2>&1 &
           sleep 4
+          
+          # 检查端口是否成功监听
+          if ! nc -z 127.0.0.1 10808; then
+            echo "❌ 代理引擎启动失败或未监听 10808 端口，请检查配置或节点格式。"
+            cat mihomo.log
+            exit 1
+          fi
+          
           echo "✅ 代理引擎已成功在本地 10808 端口启动！"
 
       - name: 🚀 执行自动续期 + 更新 Cookie
